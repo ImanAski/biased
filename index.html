@@ -2,13 +2,25 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // Apply the persisted theme before first paint to avoid a flash.
+      try {
+        const saved = localStorage.getItem("bias-controller.theme");
+        const dark =
+          saved === "dark" ||
+          (!saved &&
+            !window.matchMedia("(prefers-color-scheme: light)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+      } catch {}
+    </script>
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bias Controller</title>
   </head>
 
   <body>
-    <!-- Bias Controller app shell -->
-    <div id="app"></div>    <script type="module" src="/src/main.ts"></script>
+    <!-- Bias Controller -->
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

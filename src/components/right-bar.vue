@@ -66,7 +66,9 @@ function applyDither(key: DitherKey, raw: number) {
   if (!Number.isFinite(raw)) return;
 
   const clamped = Math.min(max, Math.max(min, raw));
-  const snapped = Number((min + Math.round((clamped - min) / step) * step).toFixed(6));
+  const snapped = Number(
+    (min + Math.round((clamped - min) / step) * step).toFixed(6),
+  );
 
   if (key === "amp") state.ditherAmp = snapped;
   else state.ditherFreq = snapped;
@@ -92,19 +94,19 @@ function displayValue(value: number): string {
 }
 
 const fieldClass =
-  "w-full rounded-lg border border-slate-600 bg-[#12161F] px-3 py-2 text-sm text-white outline-none focus:border-teal-400 disabled:opacity-50";
+  "w-full rounded-lg border border-line bg-field px-3 py-2 text-sm text-ink outline-none transition focus:border-accent disabled:opacity-50";
 </script>
 
 <template>
   <div class="flex h-full min-w-80 flex-col gap-4 px-3 py-3">
-    <span class="text-2xl font-semibold text-white">Control</span>
+    <span class="text-2xl font-semibold text-ink">Control</span>
 
     <!-- Serial link -->
-    <section class="space-y-2 rounded-2xl border border-slate-600 bg-[#222A3A] p-3">
+    <section class="space-y-2 rounded-2xl border border-line bg-panel p-3">
       <div class="flex items-center justify-between">
-        <span class="text-xs font-bold uppercase text-slate-400">Serial link</span>
+        <span class="text-xs font-bold uppercase text-muted">Serial link</span>
         <button
-          class="rounded px-1 text-slate-400 hover:text-white disabled:opacity-40"
+          class="rounded px-1 text-muted transition hover:text-ink disabled:opacity-40"
           :disabled="status.connected"
           title="Rescan ports"
           @click="rescan"
@@ -136,7 +138,7 @@ const fieldClass =
           class="shrink-0 rounded-lg px-4 py-2 text-sm font-semibold text-white transition disabled:opacity-40"
           :class="
             status.connected
-              ? 'bg-red-500/80 hover:bg-red-500'
+              ? 'bg-danger/80 hover:bg-danger'
               : 'bg-teal-600 hover:bg-teal-500'
           "
           :disabled="busy || (!status.connected && !canConnect)"
@@ -146,19 +148,19 @@ const fieldClass =
         </button>
       </div>
 
-      <p v-if="uiError" class="text-xs text-red-400">{{ uiError }}</p>
-      <p v-else-if="status.lastError" class="text-xs text-red-400">
+      <p v-if="uiError" class="text-xs text-danger">{{ uiError }}</p>
+      <p v-else-if="status.lastError" class="text-xs text-danger">
         {{ status.lastError }}
       </p>
     </section>
 
     <!-- Bias point -->
-    <section class="space-y-3 rounded-2xl border border-slate-600 bg-[#222A3A] p-3">
+    <section class="space-y-3 rounded-2xl border border-line bg-panel p-3">
       <div class="flex items-center justify-between">
-        <span class="text-xs font-bold uppercase text-slate-400">Bias</span>
+        <span class="text-xs font-bold uppercase text-muted">Bias</span>
         <button
           class="relative h-6 w-11 rounded-full transition"
-          :class="state.biasEnabled ? 'bg-teal-500' : 'bg-slate-600'"
+          :class="state.biasEnabled ? 'bg-teal-500' : 'bg-line'"
           role="switch"
           :aria-checked="state.biasEnabled"
           @click="state.biasEnabled = !state.biasEnabled"
@@ -177,8 +179,8 @@ const fieldClass =
           class="rounded-lg border px-2 py-2 text-sm font-medium transition"
           :class="
             state.biasPoint === point
-              ? 'border-teal-400/60 bg-teal-500/20 text-teal-200'
-              : 'border-slate-600 bg-[#12161F] text-slate-400 hover:border-slate-500'
+              ? 'border-accent/50 bg-accent/15 text-accent'
+              : 'border-line bg-field text-muted hover:border-line-strong hover:text-ink'
           "
           @click="state.biasPoint = point"
         >
@@ -188,17 +190,13 @@ const fieldClass =
     </section>
 
     <!-- Dither -->
-    <section class="space-y-3 rounded-2xl border border-slate-600 bg-[#222A3A] p-3">
-      <span class="text-xs font-bold uppercase text-slate-400">Dither</span>
+    <section class="space-y-3 rounded-2xl border border-line bg-panel p-3">
+      <span class="text-xs font-bold uppercase text-muted">Dither</span>
 
-      <div
-        v-for="field in DITHER_FIELDS"
-        :key="field.key"
-        class="space-y-1"
-      >
-        <div class="flex justify-between text-xs text-slate-400">
+      <div v-for="field in DITHER_FIELDS" :key="field.key" class="space-y-1">
+        <div class="flex justify-between text-xs text-muted">
           <span>{{ field.label }}</span>
-          <span class="text-white">
+          <span class="text-ink">
             {{ displayValue(ditherValue(field.key)) }} {{ field.unit }}
           </span>
         </div>
@@ -224,19 +222,19 @@ const fieldClass =
     </section>
 
     <button
-      class="rounded-lg border border-teal-400/60 bg-teal-500/15 py-2 text-sm font-semibold text-teal-200 transition hover:bg-teal-500/25 disabled:opacity-40"
-      :disabled="!status.connected"
-      @click="calibrate"
-    >
-      Calibrate
-    </button>
-
-    <button
-      class="rounded-lg border border-slate-600 py-2 text-sm text-slate-300 hover:border-slate-400 hover:text-white disabled:opacity-40"
+      class="rounded-lg border border-line py-2 text-sm text-muted transition hover:border-line-strong hover:text-ink disabled:opacity-40"
       :disabled="!status.connected"
       @click="sendNow"
     >
       Send now
+    </button>
+
+    <button
+      class="rounded-lg border border-accent/40 bg-accent/15 py-2 text-sm font-semibold text-accent transition hover:bg-accent/25 disabled:opacity-40"
+      :disabled="!status.connected"
+      @click="calibrate"
+    >
+      Calibrate
     </button>
   </div>
 </template>

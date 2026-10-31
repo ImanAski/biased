@@ -15,7 +15,7 @@ onMounted(initDevice);
 </script>
 
 <template>
-  <main class="h-screen flex flex-col bg-[#1B2230]">
+  <main class="h-screen flex flex-col bg-app">
     <InfoBar />
 
     <div class="flex flex-1 min-h-0">
@@ -24,7 +24,7 @@ onMounted(initDevice);
       </div>
       <div
         id="center"
-        class="flex-1 overflow-auto p-4 bg-[#12161F] border-l border-r border-slate-500"
+        class="flex-1 overflow-auto p-4 bg-center border-l border-r border-line"
       >
         <OverviewPage v-if="currentView === 'overview'" />
         <SettingsPage v-else-if="currentView === 'settings'" />

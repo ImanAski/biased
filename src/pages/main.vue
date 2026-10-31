@@ -17,8 +17,8 @@ const notes: Record<MetricKey, string> = {
 <template>
   <div class="mb-4 flex justify-between">
     <div class="mb-4 flex flex-col justify-start">
-      <span class="text-4xl font-semibold text-white">Overview</span>
-      <span class="text-md text-slate-400"
+      <span class="text-4xl font-semibold text-ink">Overview</span>
+      <span class="text-md text-muted"
         >Realtime telemetry & bias control for MCU-04</span
       >
     </div>
@@ -26,8 +26,8 @@ const notes: Record<MetricKey, string> = {
       class="h-fit rounded-2xl px-3 py-1 text-sm"
       :class="
         status.connected
-          ? 'bg-green-500/20 text-green-300'
-          : 'bg-slate-500/20 text-slate-400'
+          ? 'bg-success/15 text-success'
+          : 'bg-faint/20 text-muted'
       "
     >
       {{ status.connected ? "Master active" : "Idle" }}
@@ -54,8 +54,8 @@ const notes: Record<MetricKey, string> = {
   </div>
 
   <!-- Control state currently being sent to the MCU every tick. -->
-  <div class="mb-4 flex items-center gap-3 text-xs text-slate-500">
-    <span class="rounded bg-slate-500/20 px-2 py-1 text-slate-300">
+  <div class="mb-4 flex items-center gap-3 text-xs text-faint">
+    <span class="rounded bg-faint/20 px-2 py-1 text-muted">
       TX every {{ status.tickMs }} ms
     </span>
     <span>

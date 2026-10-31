@@ -11,9 +11,9 @@ const exportError = ref<string | null>(null);
 const hasLogs = computed(() => logs.length > 0);
 
 const levelClass: Record<string, string> = {
-  info: "text-slate-300",
-  warn: "text-amber-300",
-  error: "text-red-400",
+  info: "text-muted",
+  warn: "text-warning",
+  error: "text-danger",
 };
 
 function formatTime(ms: number): string {
@@ -53,13 +53,13 @@ async function exportLogs() {
   <div class="flex flex-col gap-4">
     <div class="flex items-end justify-between">
       <div class="flex flex-col">
-        <span class="text-4xl font-semibold text-white">Logs</span>
-        <span class="text-slate-400">Session events and export</span>
+        <span class="text-4xl font-semibold text-ink">Logs</span>
+        <span class="text-muted">Session events and export</span>
       </div>
 
       <div class="flex items-center gap-2">
         <button
-          class="rounded-lg border border-slate-600 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-400 hover:text-white disabled:opacity-40"
+          class="rounded-lg border border-line px-3 py-2 text-sm text-muted transition hover:border-line-strong hover:text-ink disabled:opacity-40"
           :disabled="!hasLogs"
           @click="clearLogs"
         >
@@ -75,13 +75,11 @@ async function exportLogs() {
       </div>
     </div>
 
-    <p v-if="exportError" class="text-sm text-red-400">{{ exportError }}</p>
+    <p v-if="exportError" class="text-sm text-danger">{{ exportError }}</p>
 
-    <div
-      class="overflow-hidden rounded-2xl border border-slate-400 bg-[#222A3A]"
-    >
+    <div class="overflow-hidden rounded-2xl border border-line bg-panel">
       <div
-        class="flex items-center justify-between border-b border-slate-600 px-4 py-2 text-xs text-slate-400"
+        class="flex items-center justify-between border-b border-line px-4 py-2 text-xs text-muted"
       >
         <span class="font-bold uppercase">Session log</span>
         <span>{{ logs.length }} entries</span>
@@ -96,19 +94,19 @@ async function exportLogs() {
           :key="entry.id"
           class="flex gap-3 py-0.5"
         >
-          <span class="shrink-0 text-slate-500">{{ formatTime(entry.time) }}</span>
+          <span class="shrink-0 text-faint">{{ formatTime(entry.time) }}</span>
           <span
             class="w-12 shrink-0 uppercase"
             :class="levelClass[entry.level]"
             >{{ entry.level }}</span
           >
-          <span class="whitespace-pre-wrap break-words text-slate-200">{{
+          <span class="whitespace-pre-wrap break-words text-ink">{{
             entry.message
           }}</span>
         </div>
       </div>
 
-      <div v-else class="px-4 py-10 text-center text-sm text-slate-500">
+      <div v-else class="px-4 py-10 text-center text-sm text-faint">
         No events yet. Connect to the MCU to populate the log.
       </div>
     </div>

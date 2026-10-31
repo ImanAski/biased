@@ -1,1 +1,81 @@
 @import "tailwindcss";
+
+/* Manual theme switching: `.dark` on <html> selects the dark palette. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+
+  --app-bg: #eef2f7;
+  --center-bg: #f8fafc;
+  --panel-bg: #ffffff;
+  --field-bg: #f8fafc;
+
+  --ink: #0f172a;
+  --muted: #475569;
+  --faint: #64748b;
+  --dim: #94a3b8;
+
+  --line: #cbd5e1;
+  --line-strong: #94a3b8;
+
+  --accent: #0f766e;
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #b91c1c;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --app-bg: #1b2230;
+  --center-bg: #12161f;
+  --panel-bg: #222a3a;
+  --field-bg: #12161f;
+
+  --ink: #ffffff;
+  --muted: #94a3b8;
+  --faint: #64748b;
+  --dim: #56607a;
+
+  --line: #475569;
+  --line-strong: #94a3b8;
+
+  --accent: #5eead4;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #f87171;
+}
+
+@theme inline {
+  --color-app: var(--app-bg);
+  --color-center: var(--center-bg);
+  --color-panel: var(--panel-bg);
+  --color-field: var(--field-bg);
+
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-dim: var(--dim);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-accent: var(--accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--app-bg);
+  color: var(--ink);
+  transition: background-color 150ms ease, color 150ms ease;
+}

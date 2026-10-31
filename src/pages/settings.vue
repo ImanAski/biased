@@ -10,7 +10,7 @@ import {
 import { resetSettings, settings } from "../lib/settings";
 
 const fieldClass =
-  "w-full rounded-lg border border-slate-600 bg-[#12161F] px-3 py-2 text-sm text-white outline-none focus:border-teal-400";
+  "w-full rounded-lg border border-line bg-field px-3 py-2 text-sm text-ink outline-none transition focus:border-accent";
 
 function invalidRange(key: MetricKey): boolean {
   const range = settings.monitors[key];
@@ -33,17 +33,19 @@ function resetDefaults() {
 <template>
   <div class="flex flex-col gap-4">
     <div class="flex flex-col">
-      <span class="text-4xl font-semibold text-white">Settings</span>
-      <span class="text-slate-400">Link defaults, monitoring ranges and device information</span>
+      <span class="text-4xl font-semibold text-ink">Settings</span>
+      <span class="text-muted"
+        >Link defaults, monitoring ranges and device information</span
+      >
     </div>
 
-    <section class="space-y-3 rounded-2xl border border-slate-400 bg-[#222A3A] p-5">
-      <span class="text-xs font-bold uppercase text-slate-400"
+    <section class="space-y-3 rounded-2xl border border-line bg-panel p-5">
+      <span class="text-xs font-bold uppercase text-muted"
         >Serial defaults</span
       >
 
       <label class="block max-w-xs space-y-1">
-        <span class="text-sm text-slate-300">Default baud rate</span>
+        <span class="text-sm text-muted">Default baud rate</span>
         <input
           v-model.number="settings.defaultBaud"
           type="number"
@@ -51,18 +53,18 @@ function resetDefaults() {
           step="100"
           :class="fieldClass"
         />
-        <span class="block text-xs text-slate-500">
+        <span class="block text-xs text-faint">
           Pre-filled when connecting. The live link uses the value chosen in the
           control panel.
         </span>
       </label>
     </section>
 
-    <section class="space-y-3 rounded-2xl border border-slate-400 bg-[#222A3A] p-5">
-      <span class="text-xs font-bold uppercase text-slate-400"
+    <section class="space-y-3 rounded-2xl border border-line bg-panel p-5">
+      <span class="text-xs font-bold uppercase text-muted"
         >Monitoring ranges</span
       >
-      <p class="text-xs text-slate-500">
+      <p class="text-xs text-faint">
         Each card shows a position bar within this range and flags values as out
         of range.
       </p>
@@ -71,16 +73,16 @@ function resetDefaults() {
         <div
           v-for="metric in METRICS"
           :key="metric.key"
-          class="space-y-2 rounded-xl border border-slate-700 bg-[#12161F] p-3"
+          class="space-y-2 rounded-xl border border-line bg-field p-3"
         >
           <div class="flex items-center justify-between">
-            <span class="text-sm font-medium text-white">{{ metric.label }}</span>
-            <span class="text-xs text-slate-500">{{ metric.unit }}</span>
+            <span class="text-sm font-medium text-ink">{{ metric.label }}</span>
+            <span class="text-xs text-faint">{{ metric.unit }}</span>
           </div>
 
           <div class="grid grid-cols-2 gap-2">
             <label class="space-y-1">
-              <span class="text-xs text-slate-400">Min</span>
+              <span class="text-xs text-muted">Min</span>
               <input
                 v-model.number="settings.monitors[metric.key].min"
                 type="number"
@@ -89,7 +91,7 @@ function resetDefaults() {
               />
             </label>
             <label class="space-y-1">
-              <span class="text-xs text-slate-400">Max</span>
+              <span class="text-xs text-muted">Max</span>
               <input
                 v-model.number="settings.monitors[metric.key].max"
                 type="number"
@@ -99,18 +101,18 @@ function resetDefaults() {
             </label>
           </div>
 
-          <p v-if="invalidRange(metric.key)" class="text-xs text-amber-300">
+          <p v-if="invalidRange(metric.key)" class="text-xs text-warning">
             Min must be less than max.
           </p>
         </div>
       </div>
     </section>
 
-    <section class="space-y-3 rounded-2xl border border-slate-400 bg-[#222A3A] p-5">
-      <span class="text-xs font-bold uppercase text-slate-400"
+    <section class="space-y-3 rounded-2xl border border-line bg-panel p-5">
+      <span class="text-xs font-bold uppercase text-muted"
         >Dither controls</span
       >
-      <p class="text-xs text-slate-500">
+      <p class="text-xs text-faint">
         Limits and step for the amplitude and frequency controls in the control
         panel.
       </p>
@@ -119,16 +121,16 @@ function resetDefaults() {
         <div
           v-for="field in DITHER_FIELDS"
           :key="field.key"
-          class="space-y-2 rounded-xl border border-slate-700 bg-[#12161F] p-3"
+          class="space-y-2 rounded-xl border border-line bg-field p-3"
         >
           <div class="flex items-center justify-between">
-            <span class="text-sm font-medium text-white">{{ field.label }}</span>
-            <span class="text-xs text-slate-500">{{ field.unit }}</span>
+            <span class="text-sm font-medium text-ink">{{ field.label }}</span>
+            <span class="text-xs text-faint">{{ field.unit }}</span>
           </div>
 
           <div class="grid grid-cols-3 gap-2">
             <label class="space-y-1">
-              <span class="text-xs text-slate-400">Min</span>
+              <span class="text-xs text-muted">Min</span>
               <input
                 v-model.number="settings.dither[field.key].min"
                 type="number"
@@ -137,7 +139,7 @@ function resetDefaults() {
               />
             </label>
             <label class="space-y-1">
-              <span class="text-xs text-slate-400">Max</span>
+              <span class="text-xs text-muted">Max</span>
               <input
                 v-model.number="settings.dither[field.key].max"
                 type="number"
@@ -146,7 +148,7 @@ function resetDefaults() {
               />
             </label>
             <label class="space-y-1">
-              <span class="text-xs text-slate-400">Step</span>
+              <span class="text-xs text-muted">Step</span>
               <input
                 v-model.number="settings.dither[field.key].step"
                 type="number"
@@ -156,41 +158,39 @@ function resetDefaults() {
             </label>
           </div>
 
-          <p v-if="invalidControl(field.key)" class="text-xs text-amber-300">
+          <p v-if="invalidControl(field.key)" class="text-xs text-warning">
             {{ invalidControl(field.key) }}
           </p>
         </div>
       </div>
     </section>
 
-    <section class="space-y-2 rounded-2xl border border-slate-400 bg-[#222A3A] p-5">
-      <span class="text-xs font-bold uppercase text-slate-400"
-        >Master clock</span
-      >
+    <section class="space-y-2 rounded-2xl border border-line bg-panel p-5">
+      <span class="text-xs font-bold uppercase text-muted">Master clock</span>
       <div class="flex justify-between text-sm">
-        <span class="text-slate-400">State frame period</span>
-        <span class="text-white">{{ status.tickMs }} ms</span>
+        <span class="text-muted">State frame period</span>
+        <span class="text-ink">{{ status.tickMs }} ms</span>
       </div>
       <div class="flex justify-between text-sm">
-        <span class="text-slate-400">Role</span>
-        <span class="text-white">Serial master</span>
+        <span class="text-muted">Role</span>
+        <span class="text-ink">Serial master</span>
       </div>
     </section>
 
-    <section class="space-y-2 rounded-2xl border border-slate-400 bg-[#222A3A] p-5">
-      <span class="text-xs font-bold uppercase text-slate-400">Device</span>
+    <section class="space-y-2 rounded-2xl border border-line bg-panel p-5">
+      <span class="text-xs font-bold uppercase text-muted">Device</span>
       <div class="flex justify-between text-sm">
-        <span class="text-slate-400">Controller</span>
-        <span class="text-white">MCU-04</span>
+        <span class="text-muted">Controller</span>
+        <span class="text-ink">MCU-04</span>
       </div>
       <div class="flex justify-between text-sm">
-        <span class="text-slate-400">Application</span>
-        <span class="text-white">v0.0.1a</span>
+        <span class="text-muted">Application</span>
+        <span class="text-ink">v0.0.1a</span>
       </div>
     </section>
 
     <button
-      class="w-fit rounded-lg border border-slate-600 px-4 py-2 text-sm text-slate-300 transition hover:border-slate-400 hover:text-white"
+      class="w-fit rounded-lg border border-line px-4 py-2 text-sm text-muted transition hover:border-line-strong hover:text-ink"
       @click="resetDefaults"
     >
       Reset to defaults

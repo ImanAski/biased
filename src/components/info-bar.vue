@@ -3,29 +3,29 @@ import { lastSeq, status } from "../lib/device";
 </script>
 
 <template>
-  <div class="px-3 py-2 border-b border-slate-700/70">
+  <div class="px-3 py-2 border-b border-line">
     <div
       v-if="status.connected"
-      class="flex items-center justify-between text-xs text-slate-300"
+      class="flex items-center justify-between text-xs text-muted"
     >
       <div class="flex items-center gap-2">
-        <span class="inline-block h-2 w-2 rounded-full bg-green-400 animate-pulse" />
-        <span class="text-white font-semibold">{{ status.portName }}</span>
-        <span class="text-slate-400">@ {{ status.baud }} baud</span>
-        <span class="text-slate-500">· master tick {{ status.tickMs }} ms</span>
+        <span class="inline-block h-2 w-2 rounded-full bg-success animate-pulse" />
+        <span class="text-ink font-semibold">{{ status.portName }}</span>
+        <span>@ {{ status.baud }} baud</span>
+        <span class="text-faint">· master tick {{ status.tickMs }} ms</span>
       </div>
       <div class="flex items-center gap-4">
         <span>tx {{ status.txs.toLocaleString() }}</span>
-        <span class="text-slate-500">seq {{ lastSeq }}</span>
+        <span class="text-faint">seq {{ lastSeq }}</span>
       </div>
     </div>
 
     <div v-else class="flex items-center justify-between text-xs">
       <div class="flex items-center gap-2">
-        <span class="inline-block h-2 w-2 rounded-full bg-slate-500" />
-        <span class="text-[#56607A]">Not Connected</span>
+        <span class="inline-block h-2 w-2 rounded-full bg-faint" />
+        <span class="text-dim">Not Connected</span>
       </div>
-      <span v-if="status.lastError" class="text-red-400">{{
+      <span v-if="status.lastError" class="text-danger">{{
         status.lastError
       }}</span>
     </div>

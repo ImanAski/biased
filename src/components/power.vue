@@ -61,9 +61,9 @@ const badge = computed(() => {
 });
 
 const badgeClass = computed(() => {
-  if (props.value === null) return "bg-slate-500/20 text-slate-400";
-  if (inRange.value === false) return "bg-amber-500/20 text-amber-300";
-  return "bg-green-500/20 text-green-300";
+  if (props.value === null) return "bg-faint/20 text-muted";
+  if (inRange.value === false) return "bg-warning/15 text-warning";
+  return "bg-success/15 text-success";
 });
 
 const rangeText = computed(() => {
@@ -73,37 +73,35 @@ const rangeText = computed(() => {
 </script>
 
 <template>
-  <div
-    class="w-full space-y-3 rounded-2xl border border-slate-400 bg-[#222A3A] p-5"
-  >
+  <div class="w-full space-y-3 rounded-2xl border border-line bg-panel p-5">
     <div class="flex justify-between">
-      <span class="font-bold uppercase text-slate-400">{{ title }}</span>
+      <span class="font-bold uppercase text-muted">{{ title }}</span>
       <span class="rounded-2xl px-2" :class="badgeClass">{{ badge }}</span>
     </div>
 
     <div class="flex items-end justify-start">
       <span
         class="text-4xl"
-        :class="inRange === false ? 'text-amber-300' : 'text-white'"
+        :class="inRange === false ? 'text-warning' : 'text-ink'"
         >{{ display }}</span
       >
-      <span class="text-sm text-slate-400">{{ unit }}</span>
+      <span class="text-sm text-muted">{{ unit }}</span>
     </div>
 
     <div
       v-if="hasRange"
-      class="h-1.5 w-full overflow-hidden rounded-full bg-slate-700"
+      class="h-1.5 w-full overflow-hidden rounded-full bg-line"
     >
       <div
         class="h-full rounded-full transition-all"
-        :class="inRange === false ? 'bg-amber-400' : 'bg-teal-400'"
+        :class="inRange === false ? 'bg-warning' : 'bg-accent'"
         :style="{ width: `${fillPercent}%` }"
       />
     </div>
 
     <div class="flex justify-between gap-2 text-xs">
-      <span class="text-slate-500">{{ notes }}</span>
-      <span v-if="rangeText" class="shrink-0 text-slate-600">{{ rangeText }}</span>
+      <span class="text-faint">{{ notes }}</span>
+      <span v-if="rangeText" class="shrink-0 text-dim">{{ rangeText }}</span>
     </div>
   </div>
 </template>
