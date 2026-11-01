@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { lastSeq, status, uiError } from "../lib/device";
+import { rxTotals } from "../lib/packets";
 </script>
 
 <template>
@@ -29,6 +30,11 @@ import { lastSeq, status, uiError } from "../lib/device";
         <span class="text-faint">frames</span>
         <span class="text-ink">{{ status.txs }}</span>
         <span class="text-dim">· last seq {{ lastSeq }}</span>
+      </li>
+      <li>
+        <span class="text-faint">rx</span>
+        <span class="text-ink">{{ rxTotals.chunks }}</span>
+        <span class="text-dim">chunks · {{ rxTotals.bytes }} bytes</span>
       </li>
       <li v-if="status.lastError" class="text-danger">
         error {{ status.lastError }}

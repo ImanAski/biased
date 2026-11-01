@@ -1,26 +1,18 @@
 <script setup lang="ts">
 import Events from "../components/events.vue";
+import MonitorCard from "../components/monitor-card.vue";
 import Plot from "../components/Plot.vue";
-import Power from "../components/power.vue";
-import { state, status, telemetry } from "../lib/device";
-import { METRICS, type MetricKey } from "../lib/metrics";
-import { settings } from "../lib/settings";
-
-const notes: Record<MetricKey, string> = {
-  theta0: "Measured angle",
-  temp: "Measured temperature",
-  inputPower: "Measured at input",
-  outputPower: "Measured at output",
-};
+import { state, status } from "../lib/device";
+import { configErrors, monitorValue, widgetConfig } from "../lib/widgets";
 </script>
 
 <template>
   <div class="mb-4 flex justify-between">
     <div class="mb-4 flex flex-col justify-start">
       <span class="text-4xl font-semibold text-ink">Overview</span>
-      <span class="text-md text-muted"
-        >Realtime telemetry & bias control for MCU-04</span
-      >
+      <span class="text-md text-muted">
+        Realtime telemetry &amp; bias control for {{ widgetConfig.title }}
+      </span>
     </div>
     <span
       class="h-fit rounded-2xl px-3 py-1 text-sm"
@@ -38,19 +30,38 @@ const notes: Record<MetricKey, string> = {
     <Plot />
   </div>
 
-  <!-- Monitored values reported by the MCU (read-only, range set in Settings). -->
-  <div class="mb-4 grid grid-cols-2 gap-4">
-    <Power
-      v-for="metric in METRICS"
-      :key="metric.key"
-      :title="metric.label"
-      :value="telemetry[metric.key]"
-      :unit="metric.unit"
-      :digits="metric.digits"
-      :min="settings.monitors[metric.key].min"
-      :max="settings.monitors[metric.key].max"
-      :notes="notes[metric.key]"
+  <div
+    v-if="configErrors.length > 0"
+    class="mb-4 rounded-2xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning"
+  >
+    Widget config has {{ configErrors.length }}
+    {{ configErrors.length === 1 ? "problem" : "problems" }}. Showing the last
+    good layout — fix it in Settings.
+  </div>
+
+  <!-- Monitors are defined in widgets.toml and fed by inbound TLM lines. -->
+  <div v-if="widgetConfig.monitors.length > 0" class="mb-4 grid grid-cols-2 gap-4">
+    <MonitorCard
+      v-for="monitor in widgetConfig.monitors"
+      :key="monitor.id"
+      :title="monitor.label"
+      :value="monitorValue(monitor)"
+      :unit="monitor.unit"
+      :digits="monitor.digits"
+      :min="monitor.range?.min ?? null"
+      :max="monitor.range?.max ?? null"
+      :low="monitor.threshold?.low ?? null"
+      :high="monitor.threshold?.high ?? null"
+      :notes="monitor.description"
     />
+  </div>
+
+  <div
+    v-else
+    class="mb-4 rounded-2xl border border-dashed border-line px-4 py-8 text-center text-sm text-faint"
+  >
+    No monitors configured. Add a <code>[[monitors]]</code> entry to
+    <code>widgets.toml</code>.
   </div>
 
   <!-- Control state currently being sent to the MCU every tick. -->

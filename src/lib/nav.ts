@@ -1,6 +1,6 @@
 import { ref } from "vue";
 
-export type View = "overview" | "settings" | "logs";
+export type View = "overview" | "packets" | "settings" | "logs";
 
 export interface ViewItem {
   id: View;
@@ -9,6 +9,7 @@ export interface ViewItem {
 
 export const views: ViewItem[] = [
   { id: "overview", label: "Overview" },
+  { id: "packets", label: "Packet Lab" },
   { id: "settings", label: "Settings" },
   { id: "logs", label: "Logs" },
 ];

@@ -2,16 +2,23 @@
 import "./app.css";
 import { onMounted } from "vue";
 import { initDevice } from "./lib/device";
+import { initPackets } from "./lib/packets";
+import { initWidgets } from "./lib/widgets";
 import { currentView } from "./lib/nav";
 import InfoBar from "./components/info-bar.vue";
 import OverviewPage from "./pages/main.vue";
+import PacketsPage from "./pages/packets.vue";
 import SettingsPage from "./pages/settings.vue";
 import LogsPage from "./pages/logs.vue";
 import RightBar from "./components/right-bar.vue";
 import LeftBar from "./components/left-bar.vue";
 
 // Connects event listeners, loads ports and starts mirroring UI state to Rust.
-onMounted(initDevice);
+onMounted(() => {
+  void initDevice();
+  void initPackets();
+  void initWidgets();
+});
 </script>
 
 <template>
@@ -27,6 +34,7 @@ onMounted(initDevice);
         class="flex-1 overflow-auto p-4 bg-center border-l border-r border-line"
       >
         <OverviewPage v-if="currentView === 'overview'" />
+        <PacketsPage v-else-if="currentView === 'packets'" />
         <SettingsPage v-else-if="currentView === 'settings'" />
         <LogsPage v-else />
       </div>

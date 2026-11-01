@@ -1,0 +1,131 @@
+# =============================================================================
+#  Bias Controller — widget layout
+# =============================================================================
+#
+#  This file decides which monitor cards and control widgets appear in the app.
+#  Edit it with any text editor, then press "Reload" in Settings (or restart the
+#  app). A broken file is reported in the UI and the last good layout is kept.
+#
+#  The app copies this file to its own config directory on first launch:
+#    Windows : %APPDATA%\com.iman.tauri-biased\widgets.toml
+#    macOS   : ~/Library/Application Support/com.iman.tauri-biased/widgets.toml
+#    Linux   : ~/.config/com.iman.tauri-biased/widgets.toml
+#
+#  You can also open any other .toml file from Settings.
+#
+#  Monitors (read-only, fed by inbound telemetry lines):
+#    id          unique name for this widget
+#    label       card title (defaults to id)
+#    source      telemetry field: theta0 | temp | biasVoltage | inputPower |
+#                outputPower (defaults to id)
+#    unit        unit suffix shown next to the value
+#    digits      decimal places (default 1)
+#    description small caption under the value
+#    range       display range for the bar: { min = 0, max = 100 }
+#    threshold   alarm limits:             { low = 10, high = 80 }
+#                Values outside low/high are highlighted as LOW / HIGH.
+#                Both keys are optional.
+#
+#  Controls (writable, mirrored to the MCU every tick):
+#    id          unique name for this widget
+#    label       widget title (defaults to id)
+#    kind        toggle | select | range
+#    target      device state field:
+#                  toggle -> biasEnabled
+#                  select -> biasPoint | mode
+#                  range  -> ditherAmp | ditherFreq | mode
+#    unit        unit suffix (range only)
+#    description small caption
+#    options     select only, list of choices, e.g. ["QUAD+", "QUAD-"]
+#    range       range only: { min = 0, max = 10, step = 0.01 }
+#
+#  Telemetry lines the MCU can send back (see the Packet Lab page):
+#    TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\n
+# =============================================================================
+
+title = "MCU-04 · Bias stage"
+
+# --------------------------------- Monitors ----------------------------------
+
+[[monitors]]
+id = "theta0"
+label = "Θ₀"
+source = "theta0"
+unit = "°"
+digits = 1
+description = "Measured angle"
+range = { min = -180, max = 180 }
+threshold = { low = -90, high = 90 }
+
+[[monitors]]
+id = "temp"
+label = "Temperature"
+source = "temp"
+unit = "°C"
+digits = 1
+description = "Board temperature"
+range = { min = 0, max = 100 }
+threshold = { low = 5, high = 75 }
+
+[[monitors]]
+id = "input_power"
+label = "Input power"
+source = "inputPower"
+unit = "W"
+digits = 2
+description = "Measured at input"
+range = { min = 0, max = 100 }
+threshold = { high = 90 }
+
+[[monitors]]
+id = "output_power"
+label = "Output power"
+source = "outputPower"
+unit = "W"
+digits = 2
+description = "Measured at output"
+range = { min = 0, max = 100 }
+threshold = { low = 5, high = 80 }
+
+# --------------------------------- Controls ----------------------------------
+
+[[controls]]
+id = "bias_enabled"
+label = "Bias output"
+kind = "toggle"
+target = "biasEnabled"
+description = "Master enable for the bias stage"
+
+[[controls]]
+id = "bias_point"
+label = "Bias point"
+kind = "select"
+target = "biasPoint"
+description = "Operating point of the bias loop"
+options = ["QUAD+", "QUAD-", "MAX", "NULL"]
+
+[[controls]]
+id = "dither_amp"
+label = "Dither amplitude"
+kind = "range"
+target = "ditherAmp"
+unit = "V"
+description = "Peak-to-peak dither amplitude"
+range = { min = 0, max = 10, step = 0.01 }
+
+[[controls]]
+id = "dither_freq"
+label = "Dither frequency"
+kind = "range"
+target = "ditherFreq"
+unit = "Hz"
+description = "Dither tone frequency"
+range = { min = 1, max = 5000, step = 1 }
+
+[[controls]]
+id = "mode"
+label = "Operating mode"
+kind = "select"
+target = "mode"
+description = "Mode code passed through to the MCU"
+options = ["0", "1", "2", "3"]

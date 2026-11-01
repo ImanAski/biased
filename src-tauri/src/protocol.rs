@@ -17,6 +17,13 @@
 //! STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0\n
 //! CAL seq=43\n
 //! ```
+//!
+//! Inbound telemetry is line based. The app understands placeholder `TLM`
+//! lines and forwards the parsed values to the monitor cards:
+//!
+//! ```text
+//! TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\n
+//! ```
 
 use std::fmt;
 
@@ -102,6 +109,75 @@ pub fn encode_calibrate(seq: u32) -> Vec<u8> {
     format!("CAL seq={seq}\n").into_bytes()
 }
 
+/* -------------------------------------------------------------------------- */
+/* Inbound telemetry                                                          */
+/* -------------------------------------------------------------------------- */
+
+/// Partial telemetry sample decoded from one `TLM` line.
+///
+/// Missing fields are left out of the event payload so the UI can merge a
+/// sparse update without clearing values that did not change.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theta0: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temp: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bias_voltage: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_power: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_power: Option<f32>,
+}
+
+impl TelemetryPatch {
+    pub fn is_empty(&self) -> bool {
+        self.theta0.is_none()
+            && self.temp.is_none()
+            && self.bias_voltage.is_none()
+            && self.input_power.is_none()
+            && self.output_power.is_none()
+    }
+}
+
+/// Parse one complete inbound line.
+///
+/// Unknown keys are ignored, malformed tokens are skipped, and anything that
+/// is not a `TLM` line (or carries no known field) returns `None`.
+pub fn parse_telemetry_line(line: &str) -> Option<TelemetryPatch> {
+    let mut tokens = line.trim().split_whitespace();
+    if tokens.next()? != "TLM" {
+        return None;
+    }
+
+    let mut patch = TelemetryPatch::default();
+
+    for token in tokens {
+        let Some((key, raw_value)) = token.split_once('=') else {
+            continue;
+        };
+        let Ok(value) = raw_value.parse::<f32>() else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+
+        match key.to_ascii_lowercase().as_str() {
+            "theta0" | "theta" => patch.theta0 = Some(value),
+            "temp" | "temperature" => patch.temp = Some(value),
+            "vbias" | "bias" | "biasvoltage" => patch.bias_voltage = Some(value),
+            "pin" | "p_in" | "input" | "inputpower" => patch.input_power = Some(value),
+            "pout" | "p_out" | "output" | "outputpower" => patch.output_power = Some(value),
+            _ => {}
+        }
+    }
+
+    (!patch.is_empty()).then_some(patch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +205,29 @@ mod tests {
             String::from_utf8(encode_calibrate(43)).unwrap(),
             "CAL seq=43\n"
         );
+    }
+
+    #[test]
+    fn parses_telemetry_line() {
+        let patch =
+            parse_telemetry_line("TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\r\n")
+                .unwrap();
+
+        assert_eq!(
+            patch,
+            TelemetryPatch {
+                theta0: Some(12.3),
+                temp: Some(24.5),
+                bias_voltage: Some(3.3),
+                input_power: Some(1.2),
+                output_power: Some(0.8),
+            }
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_lines_and_keys() {
+        assert!(parse_telemetry_line("STATE seq=1").is_none());
+        assert!(parse_telemetry_line("TLM seq=1 unknown=2").is_none());
     }
 }

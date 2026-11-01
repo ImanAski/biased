@@ -29,6 +29,10 @@ export interface SerialStatus {
   baud: number;
   /** Frames written since the last connect. */
   txs: number;
+  /** Inbound chunks since the last connect. */
+  rxs: number;
+  /** Inbound bytes since the last connect. */
+  rxBytes: number;
   lastError: string | null;
   /** Master clock period, reported by the backend. */
   tickMs: number;
@@ -41,8 +45,7 @@ export interface TxEvent {
 
 /**
  * Values reported *by* the MCU. These are monitored only; the app never writes
- * them. `null` means "no sample yet", which is the state while RX support is
- * disabled (the app is currently transmit-only).
+ * them. `null` means "no sample yet".
  */
 export interface Telemetry {
   /** Θ₀, degrees. */
@@ -107,6 +110,8 @@ export const status = reactive<SerialStatus>({
   portName: null,
   baud: 115200,
   txs: 0,
+  rxs: 0,
+  rxBytes: 0,
   lastError: null,
   tickMs: 300,
 });
@@ -189,8 +194,7 @@ export async function initDevice() {
     lastSeq.value = event.payload.seq;
   });
 
-  // Reserved for the RX path. The backend does not emit this yet, so the
-  // monitoring cards stay empty until MCU replies are parsed.
+  // Inbound `TLM` lines parsed by the backend reader thread.
   await listen<TelemetrySample>("telemetry://state", (event) => {
     applyTelemetry(event.payload);
   });

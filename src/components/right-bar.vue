@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref } from "vue";
+import ControlWidget from "./control-widget.vue";
 import {
   calibrate,
   connect,
@@ -7,12 +8,12 @@ import {
   ports,
   refreshPorts,
   sendNow,
-  state,
   status,
   uiError,
 } from "../lib/device";
-import { BIAS_POINTS, DITHER_FIELDS, type DitherKey } from "../lib/metrics";
 import { settings } from "../lib/settings";
+import { rxTotals } from "../lib/packets";
+import { widgetConfig } from "../lib/widgets";
 
 const selectedPort = ref("");
 const baud = ref(settings.defaultBaud);
@@ -50,56 +51,18 @@ async function rescan() {
   }
 }
 
-/* ------------------------------ Dither ------------------------------ */
-
-function ditherValue(key: DitherKey): number {
-  return key === "amp" ? state.ditherAmp : state.ditherFreq;
-}
-
-/** Clamp to the configured range and snap to the configured step. */
-function applyDither(key: DitherKey, raw: number) {
-  const range = settings.dither[key];
-  const min = Math.min(range.min, range.max);
-  const max = Math.max(range.min, range.max);
-  const step = range.step > 0 ? range.step : 1;
-
-  if (!Number.isFinite(raw)) return;
-
-  const clamped = Math.min(max, Math.max(min, raw));
-  const snapped = Number(
-    (min + Math.round((clamped - min) / step) * step).toFixed(6),
-  );
-
-  if (key === "amp") state.ditherAmp = snapped;
-  else state.ditherFreq = snapped;
-}
-
-function onDitherInput(key: DitherKey, event: Event) {
-  const target = event.target as HTMLInputElement;
-  applyDither(key, Number(target.value));
-}
-
-/** Re-clamp when the user edits min/max/step in Settings. */
-watch(
-  () => settings.dither,
-  () => {
-    applyDither("amp", state.ditherAmp);
-    applyDither("freq", state.ditherFreq);
-  },
-  { deep: true },
-);
-
-function displayValue(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(2);
-}
-
 const fieldClass =
   "w-full rounded-lg border border-line bg-field px-3 py-2 text-sm text-ink outline-none transition focus:border-accent disabled:opacity-50";
 </script>
 
 <template>
-  <div class="flex h-full min-w-80 flex-col gap-4 px-3 py-3">
-    <span class="text-2xl font-semibold text-ink">Control</span>
+  <div class="flex h-full min-w-80 flex-col gap-3 overflow-y-auto px-3 py-3">
+    <div class="flex items-baseline justify-between">
+      <span class="text-2xl font-semibold text-ink">Control</span>
+      <span class="text-[10px] uppercase tracking-wide text-faint">
+        {{ widgetConfig.controls.length }} widgets
+      </span>
+    </div>
 
     <!-- Serial link -->
     <section class="space-y-2 rounded-2xl border border-line bg-panel p-3">
@@ -152,89 +115,44 @@ const fieldClass =
       <p v-else-if="status.lastError" class="text-xs text-danger">
         {{ status.lastError }}
       </p>
-    </section>
 
-    <!-- Bias point -->
-    <section class="space-y-3 rounded-2xl border border-line bg-panel p-3">
-      <div class="flex items-center justify-between">
-        <span class="text-xs font-bold uppercase text-muted">Bias</span>
-        <button
-          class="relative h-6 w-11 rounded-full transition"
-          :class="state.biasEnabled ? 'bg-teal-500' : 'bg-line'"
-          role="switch"
-          :aria-checked="state.biasEnabled"
-          @click="state.biasEnabled = !state.biasEnabled"
-        >
-          <span
-            class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform"
-            :class="state.biasEnabled ? 'translate-x-5' : 'translate-x-0'"
-          />
-        </button>
-      </div>
-
-      <div class="grid grid-cols-2 gap-2">
-        <button
-          v-for="point in BIAS_POINTS"
-          :key="point"
-          class="rounded-lg border px-2 py-2 text-sm font-medium transition"
-          :class="
-            state.biasPoint === point
-              ? 'border-accent/50 bg-accent/15 text-accent'
-              : 'border-line bg-field text-muted hover:border-line-strong hover:text-ink'
-          "
-          @click="state.biasPoint = point"
-        >
-          {{ point }}
-        </button>
+      <div class="flex justify-between font-mono text-[10px] text-faint">
+        <span>tx {{ status.txs.toLocaleString() }}</span>
+        <span>rx {{ rxTotals.chunks.toLocaleString() }}</span>
       </div>
     </section>
 
-    <!-- Dither -->
-    <section class="space-y-3 rounded-2xl border border-line bg-panel p-3">
-      <span class="text-xs font-bold uppercase text-muted">Dither</span>
+    <!-- Widgets from widgets.toml -->
+    <ControlWidget
+      v-for="control in widgetConfig.controls"
+      :key="control.id"
+      :control="control"
+    />
 
-      <div v-for="field in DITHER_FIELDS" :key="field.key" class="space-y-1">
-        <div class="flex justify-between text-xs text-muted">
-          <span>{{ field.label }}</span>
-          <span class="text-ink">
-            {{ displayValue(ditherValue(field.key)) }} {{ field.unit }}
-          </span>
-        </div>
-        <input
-          type="range"
-          class="w-full accent-teal-500"
-          :min="Math.min(settings.dither[field.key].min, settings.dither[field.key].max)"
-          :max="Math.max(settings.dither[field.key].min, settings.dither[field.key].max)"
-          :step="settings.dither[field.key].step > 0 ? settings.dither[field.key].step : 1"
-          :value="ditherValue(field.key)"
-          @input="onDitherInput(field.key, $event)"
-        />
-        <input
-          type="number"
-          :class="fieldClass"
-          :min="Math.min(settings.dither[field.key].min, settings.dither[field.key].max)"
-          :max="Math.max(settings.dither[field.key].min, settings.dither[field.key].max)"
-          :step="settings.dither[field.key].step > 0 ? settings.dither[field.key].step : 1"
-          :value="ditherValue(field.key)"
-          @change="onDitherInput(field.key, $event)"
-        />
-      </div>
-    </section>
-
-    <button
-      class="rounded-lg border border-line py-2 text-sm text-muted transition hover:border-line-strong hover:text-ink disabled:opacity-40"
-      :disabled="!status.connected"
-      @click="sendNow"
+    <div
+      v-if="widgetConfig.controls.length === 0"
+      class="rounded-2xl border border-dashed border-line px-3 py-6 text-center text-xs text-faint"
     >
-      Send now
-    </button>
+      No controls configured. Add a <code>[[controls]]</code> entry to
+      <code>widgets.toml</code>.
+    </div>
 
-    <button
-      class="rounded-lg border border-accent/40 bg-accent/15 py-2 text-sm font-semibold text-accent transition hover:bg-accent/25 disabled:opacity-40"
-      :disabled="!status.connected"
-      @click="calibrate"
-    >
-      Calibrate
-    </button>
+    <div class="mt-auto space-y-2 pt-1">
+      <button
+        class="w-full rounded-lg border border-line py-2 text-sm text-muted transition hover:border-line-strong hover:text-ink disabled:opacity-40"
+        :disabled="!status.connected"
+        @click="sendNow"
+      >
+        Send state now
+      </button>
+
+      <button
+        class="w-full rounded-lg border border-accent/40 bg-accent/15 py-2 text-sm font-semibold text-accent transition hover:bg-accent/25 disabled:opacity-40"
+        :disabled="!status.connected"
+        @click="calibrate"
+      >
+        Calibrate
+      </button>
+    </div>
   </div>
 </template>
