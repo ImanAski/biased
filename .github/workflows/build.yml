@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -78,6 +78,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && 'Bias Controller v__VERSION__' || '' }}
+          releaseBody: |
+            Desktop bias controller for the MCU-04 bias stage.
+
+            - TOML-driven monitor cards and controls
+            - Packet Lab for raw serial inspection and scheduling
+            - 300 ms state frame telemetry loop
+
+            Downloads: `.msi` / `.exe` (Windows), universal `.dmg` (macOS),
+            `.AppImage` / `.deb` / `.rpm` (Linux).
+          releaseDraft: false
+          prerelease: false
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
