@@ -26,6 +26,7 @@ import {
   sendOnce,
   sender,
   senderBusy,
+  setPacketEncoding,
   startSending,
   stopSending,
   toAscii,
@@ -605,7 +606,7 @@ function preview(packet: RxPacket): string {
                         ? 'bg-accent/15 text-accent'
                         : 'text-muted hover:text-ink'
                     "
-                    @click="packet.encoding = 'text'"
+                    @click="setPacketEncoding(packet, 'text')"
                   >
                     TXT
                   </button>
@@ -616,7 +617,7 @@ function preview(packet: RxPacket): string {
                         ? 'bg-accent/15 text-accent'
                         : 'text-muted hover:text-ink'
                     "
-                    @click="packet.encoding = 'hex'"
+                    @click="setPacketEncoding(packet, 'hex')"
                   >
                     HEX
                   </button>
@@ -675,14 +676,15 @@ function preview(packet: RxPacket): string {
                 <div class="flex items-center gap-1.5">
                   <button
                     class="rounded-md border border-line px-2 py-1 text-[10px] text-muted transition hover:text-ink disabled:opacity-40"
-                    :disabled="!status.connected"
+                    :disabled="!status.connected || !!payloadInfo(packet).error"
                     title="Write this packet now"
                     @click="sendOnce(packet)"
                   >
                     Send
                   </button>
                   <button
-                    class="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-[10px] text-accent transition hover:bg-accent/20"
+                    class="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-[10px] text-accent transition hover:bg-accent/20 disabled:opacity-40"
+                    :disabled="!!payloadInfo(packet).error"
                     title="Inject as inbound data (no hardware needed)"
                     @click="injectPacket(packet)"
                   >

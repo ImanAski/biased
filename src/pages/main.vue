@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import Events from "../components/events.vue";
-import MonitorCard from "../components/monitor-card.vue";
+import MonitorView from "../components/monitor-view.vue";
 import Plot from "../components/Plot.vue";
 import { state, status } from "../lib/device";
-import { configErrors, locked, monitorValue, widgetConfig } from "../lib/widgets";
+import { configErrors, locked, widgetConfig } from "../lib/widgets";
 </script>
 
 <template>
@@ -46,18 +46,10 @@ import { configErrors, locked, monitorValue, widgetConfig } from "../lib/widgets
 
   <!-- Monitors are defined in widgets.toml and fed by inbound TLM lines. -->
   <div v-if="widgetConfig.monitors.length > 0" class="mb-4 grid grid-cols-2 gap-4">
-    <MonitorCard
+    <MonitorView
       v-for="monitor in widgetConfig.monitors"
       :key="monitor.id"
-      :title="monitor.label"
-      :value="monitorValue(monitor)"
-      :unit="monitor.unit"
-      :digits="monitor.digits"
-      :min="monitor.range?.min ?? null"
-      :max="monitor.range?.max ?? null"
-      :low="monitor.threshold?.low ?? null"
-      :high="monitor.threshold?.high ?? null"
-      :notes="monitor.description"
+      :monitor="monitor"
     />
   </div>
 
@@ -77,7 +69,8 @@ import { configErrors, locked, monitorValue, widgetConfig } from "../lib/widgets
     <span>
       bias {{ state.biasEnabled ? "on" : "off" }} ·
       {{ state.biasPoint }} · dither {{ state.ditherAmp }} /
-      {{ state.ditherFreq }} Hz · mode {{ state.mode }}
+      {{ state.ditherFreq }} Hz · mode {{ state.mode }} · gain
+      {{ state.gain }} · offset {{ state.offset }}
     </span>
   </div>
 

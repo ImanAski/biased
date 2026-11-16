@@ -98,6 +98,16 @@ export const capturedBytes = computed(() =>
 
 const STORAGE_KEY = "bias-controller.packet-lab";
 
+/**
+ * Shipped demo packets were once persisted with `encoding = "hex"` even though
+ * their payload is text. Treat those as text on load instead of failing with
+ * "unexpected P in hex payload".
+ */
+const LEGACY_TEXT_PAYLOADS = new Set([
+  "PING\\n",
+  "TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\\n",
+]);
+
 let nextPacketId = 1;
 let nextRxId = 1;
 let nextTxId = 1;
@@ -149,13 +159,23 @@ function loadLab(): {
     const packets = Array.isArray(saved.packets)
       ? saved.packets
           .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
-          .map((entry) =>
-            newPacket(
+          .map((entry) => {
+            const payload = typeof entry.payload === "string" ? entry.payload : "";
+            const savedEncoding: PacketEncoding =
+              entry.encoding === "hex" ? "hex" : "text";
+            const encoding =
+              savedEncoding === "hex" &&
+              LEGACY_TEXT_PAYLOADS.has(payload) &&
+              decodeHex(payload).error !== null
+                ? "text"
+                : savedEncoding;
+
+            return newPacket(
               typeof entry.label === "string" ? entry.label : "",
-              typeof entry.payload === "string" ? entry.payload : "",
-              entry.encoding === "hex" ? "hex" : "text",
-            ),
-          )
+              payload,
+              encoding,
+            );
+          })
       : [];
 
     return {
@@ -310,12 +330,30 @@ function spec(packet: ComposerPacket) {
   };
 }
 
+/** Validate a packet before it reaches the backend. */
+function payloadProblem(packet: ComposerPacket): string | null {
+  const { bytes, error } = decodePayload(packet);
+  if (error) return `${packetLabel(packet)}: ${error}`;
+  if (bytes.length === 0) return `${packetLabel(packet)}: payload is empty`;
+  if (bytes.length > 8192) {
+    return `${packetLabel(packet)}: payload is larger than 8 KiB`;
+  }
+  return null;
+}
+
 export async function sendOnce(packet: ComposerPacket) {
   packetError.value = null;
   if (!inTauri) {
     packetError.value = "Sending is only available in the desktop app.";
     return;
   }
+
+  const problem = payloadProblem(packet);
+  if (problem) {
+    packetError.value = problem;
+    return;
+  }
+
   try {
     const bytes = await invoke<number>("send_packet", { packet: spec(packet) });
     addLog("info", `Sent ${bytes} byte${bytes === 1 ? "" : "s"} · ${packetLabel(packet)}`);
@@ -331,6 +369,14 @@ export async function startSending() {
   if (composerPackets.length === 0) {
     packetError.value = "Add at least one packet first.";
     return;
+  }
+
+  for (const packet of composerPackets) {
+    const problem = payloadProblem(packet);
+    if (problem) {
+      packetError.value = problem;
+      return;
+    }
   }
 
   senderBusy.value = true;
@@ -372,6 +418,13 @@ export async function injectPacket(packet: ComposerPacket) {
     packetError.value = "Injection is only available in the desktop app.";
     return;
   }
+
+  const problem = payloadProblem(packet);
+  if (problem) {
+    packetError.value = problem;
+    return;
+  }
+
   try {
     capturePaused.value = false;
     const bytes = await invoke<number>("inject_rx", { packet: spec(packet) });
@@ -508,6 +561,49 @@ function decodeHex(payload: string): { bytes: number[]; error: string | null } {
   }
 
   return { bytes, error: null };
+}
+
+function formatHexBytes(bytes: number[]): string {
+  return bytes
+    .map((byte) => byte.toString(16).toUpperCase().padStart(2, "0"))
+    .join(" ");
+}
+
+function bytesToText(bytes: number[]): string {
+  let out = "";
+  for (const byte of bytes) {
+    if (byte === 0x0a) out += "\\n";
+    else if (byte === 0x0d) out += "\\r";
+    else if (byte === 0x09) out += "\\t";
+    else if (byte === 0x5c) out += "\\\\";
+    else if (byte >= 0x20 && byte <= 0x7e) out += String.fromCharCode(byte);
+    else out += `\\x${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+/**
+ * Switch a packet between text and hex while keeping the transmitted bytes the
+ * same. Toggling to hex rewrites the payload as spaced hex bytes and toggling
+ * back rewrites it as text with escapes, so the payload is always valid for the
+ * selected encoding.
+ */
+export function setPacketEncoding(
+  packet: ComposerPacket,
+  encoding: PacketEncoding,
+) {
+  if (packet.encoding === encoding) return;
+
+  if (encoding === "hex") {
+    const { bytes, error } = decodeText(packet.payload);
+    if (!error) packet.payload = formatHexBytes(bytes);
+    packet.encoding = "hex";
+    return;
+  }
+
+  const { bytes, error } = decodeHex(packet.payload);
+  if (!error) packet.payload = bytesToText(bytes);
+  packet.encoding = "text";
 }
 
 export function toHex(bytes: number[], max = bytes.length): string {

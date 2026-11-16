@@ -14,7 +14,7 @@
 //! serial monitor:
 //!
 //! ```text
-//! STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0\n
+//! STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0 gain=1.000 offset=0.000\n
 //! CAL seq=43\n
 //! ```
 //!
@@ -22,7 +22,7 @@
 //! lines and forwards the parsed values to the monitor cards:
 //!
 //! ```text
-//! TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\n
+//! TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 ibias=0.4 vsupply=12.1 phase=1.5 lock=1\n
 //! ```
 
 use std::fmt;
@@ -75,6 +75,10 @@ pub struct DeviceState {
     pub dither_freq: f32,
     /// Operating mode passed through to the MCU.
     pub mode: u8,
+    /// Loop gain (dimensionless unless the MCU defines otherwise).
+    pub gain: f32,
+    /// Loop offset / trim.
+    pub offset: f32,
 }
 
 impl Default for DeviceState {
@@ -85,6 +89,8 @@ impl Default for DeviceState {
             dither_amp: 0.0,
             dither_freq: 1000.0,
             mode: 0,
+            gain: 1.0,
+            offset: 0.0,
         }
     }
 }
@@ -94,12 +100,14 @@ impl Default for DeviceState {
 /// `seq` wraps at `u32::MAX` and lets the MCU detect dropped frames.
 pub fn encode_state(seq: u32, state: &DeviceState) -> Vec<u8> {
     format!(
-        "STATE seq={seq} bias={} bp={} amp={:.3} freq={:.1} mode={}\n",
+        "STATE seq={seq} bias={} bp={} amp={:.3} freq={:.1} mode={} gain={:.3} offset={:.3}\n",
         u8::from(state.bias_enabled),
         state.bias_point,
         state.dither_amp,
         state.dither_freq,
         state.mode,
+        state.gain,
+        state.offset,
     )
     .into_bytes()
 }
@@ -130,6 +138,14 @@ pub struct TelemetryPatch {
     pub input_power: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_power: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bias_current: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supply_voltage: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_error: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_status: Option<f32>,
 }
 
 impl TelemetryPatch {
@@ -139,6 +155,10 @@ impl TelemetryPatch {
             && self.bias_voltage.is_none()
             && self.input_power.is_none()
             && self.output_power.is_none()
+            && self.bias_current.is_none()
+            && self.supply_voltage.is_none()
+            && self.phase_error.is_none()
+            && self.lock_status.is_none()
     }
 }
 
@@ -171,6 +191,12 @@ pub fn parse_telemetry_line(line: &str) -> Option<TelemetryPatch> {
             "vbias" | "bias" | "biasvoltage" => patch.bias_voltage = Some(value),
             "pin" | "p_in" | "input" | "inputpower" => patch.input_power = Some(value),
             "pout" | "p_out" | "output" | "outputpower" => patch.output_power = Some(value),
+            "ibias" | "i_bias" | "biascurrent" | "current" => patch.bias_current = Some(value),
+            "vsupply" | "v_supply" | "supply" | "supplyvoltage" => {
+                patch.supply_voltage = Some(value)
+            }
+            "phase" | "phaseerror" | "perr" => patch.phase_error = Some(value),
+            "lock" | "lockstatus" | "locked" => patch.lock_status = Some(value),
             _ => {}
         }
     }
@@ -190,12 +216,14 @@ mod tests {
             dither_amp: 0.5,
             dither_freq: 1000.0,
             mode: 2,
+            gain: 1.5,
+            offset: -0.25,
         };
 
         let frame = encode_state(7, &state);
         assert_eq!(
             String::from_utf8(frame).unwrap(),
-            "STATE seq=7 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=2\n"
+            "STATE seq=7 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=2 gain=1.500 offset=-0.250\n"
         );
     }
 
@@ -209,9 +237,11 @@ mod tests {
 
     #[test]
     fn parses_telemetry_line() {
-        let patch =
-            parse_telemetry_line("TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\r\n")
-                .unwrap();
+        let patch = parse_telemetry_line(
+            "TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 \
+             ibias=0.4 vsupply=12.1 phase=1.5 lock=1\r\n",
+        )
+        .unwrap();
 
         assert_eq!(
             patch,
@@ -221,6 +251,10 @@ mod tests {
                 bias_voltage: Some(3.3),
                 input_power: Some(1.2),
                 output_power: Some(0.8),
+                bias_current: Some(0.4),
+                supply_voltage: Some(12.1),
+                phase_error: Some(1.5),
+                lock_status: Some(1.0),
             }
         );
     }

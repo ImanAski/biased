@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import ControlKnob from "./control-knob.vue";
 import {
   clampToControl,
   controlValue,
@@ -25,9 +26,28 @@ const bounds = computed(() => {
   };
 });
 
+const presets = computed(() => props.control.presets ?? []);
+const numericKind = computed(
+  () =>
+    props.control.kind === "range" ||
+    props.control.kind === "stepper" ||
+    props.control.kind === "knob",
+);
+
+function presetActive(preset: number) {
+  return Math.abs(preset - numeric.value) < bounds.value.step / 2;
+}
+
 function onNumericInput(event: Event) {
   const target = event.target as HTMLInputElement;
   setControlValue(props.control, clampToControl(props.control, Number(target.value)));
+}
+
+function nudge(direction: number) {
+  setControlValue(
+    props.control,
+    clampToControl(props.control, numeric.value + direction * bounds.value.step),
+  );
 }
 </script>
 
@@ -73,6 +93,31 @@ function onNumericInput(event: Event) {
       </button>
     </div>
 
+    <div v-else-if="control.kind === 'segmented'" class="grid grid-cols-2 gap-1.5">
+      <button
+        class="rounded-lg border px-2 py-1.5 text-sm font-medium transition"
+        :class="
+          !isOn
+            ? 'border-line-strong bg-faint/20 text-ink'
+            : 'border-line bg-field text-muted hover:border-line-strong hover:text-ink'
+        "
+        @click="setControlValue(control, false)"
+      >
+        OFF
+      </button>
+      <button
+        class="rounded-lg border px-2 py-1.5 text-sm font-medium transition"
+        :class="
+          isOn
+            ? 'border-success/50 bg-success/15 text-success'
+            : 'border-line bg-field text-muted hover:border-line-strong hover:text-ink'
+        "
+        @click="setControlValue(control, true)"
+      >
+        ON
+      </button>
+    </div>
+
     <div v-else-if="control.kind === 'range'" class="space-y-2">
       <div class="flex justify-between text-xs text-muted">
         <span class="font-mono text-ink">
@@ -105,6 +150,69 @@ function onNumericInput(event: Event) {
         :aria-label="`${control.label} value`"
         @change="onNumericInput"
       />
+    </div>
+
+    <div v-else-if="control.kind === 'stepper'" class="space-y-2">
+      <div class="flex justify-between text-xs text-muted">
+        <span class="font-mono text-ink">
+          {{ formatControlValue(numeric) }}
+          <span class="font-sans text-faint">{{ control.unit }}</span>
+        </span>
+        <span class="font-mono text-[10px] text-dim">
+          step {{ bounds.step }} · {{ bounds.min }} … {{ bounds.max }}
+        </span>
+      </div>
+
+      <div class="flex items-stretch gap-1.5">
+        <button
+          class="w-10 shrink-0 rounded-lg border border-line bg-field text-lg font-semibold text-muted transition hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          :disabled="numeric <= bounds.min"
+          :aria-label="`Decrease ${control.label}`"
+          @click="nudge(-1)"
+        >
+          −
+        </button>
+
+        <input
+          type="number"
+          class="min-w-0 flex-1 rounded-lg border border-line bg-field px-3 py-2 text-center font-mono text-sm text-ink outline-none transition focus:border-accent"
+          :min="bounds.min"
+          :max="bounds.max"
+          :step="bounds.step"
+          :value="numeric"
+          :aria-label="`${control.label} value`"
+          @change="onNumericInput"
+        />
+
+        <button
+          class="w-10 shrink-0 rounded-lg border border-line bg-field text-lg font-semibold text-muted transition hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          :disabled="numeric >= bounds.max"
+          :aria-label="`Increase ${control.label}`"
+          @click="nudge(1)"
+        >
+          +
+        </button>
+      </div>
+    </div>
+
+    <div v-else-if="control.kind === 'knob'">
+      <ControlKnob :control="control" />
+    </div>
+
+    <div v-if="numericKind && presets.length > 0" class="flex flex-wrap gap-1.5">
+      <button
+        v-for="preset in presets"
+        :key="preset"
+        class="rounded-lg border px-2 py-1 text-xs font-medium transition"
+        :class="
+          presetActive(preset)
+            ? 'border-accent/50 bg-accent/15 text-accent'
+            : 'border-line bg-field text-muted hover:border-line-strong hover:text-ink'
+        "
+        @click="setControlValue(control, preset)"
+      >
+        {{ formatControlValue(preset) }}
+      </button>
     </div>
   </section>
 </template>
