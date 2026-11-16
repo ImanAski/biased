@@ -12,20 +12,53 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_TOML: &str = include_str!("../widgets.toml");
 
 /// Telemetry fields a monitor may read.
-pub const MONITOR_SOURCES: [&str; 5] =
-    ["theta0", "temp", "biasVoltage", "inputPower", "outputPower"];
+pub const MONITOR_SOURCES: [&str; 9] = [
+    "theta0",
+    "temp",
+    "biasVoltage",
+    "inputPower",
+    "outputPower",
+    "biasCurrent",
+    "supplyVoltage",
+    "phaseError",
+    "lockStatus",
+];
 
 /// Device state fields a control may write.
-pub const CONTROL_TARGETS: [&str; 5] = [
+pub const CONTROL_TARGETS: [&str; 7] = [
     "biasEnabled",
     "biasPoint",
     "ditherAmp",
     "ditherFreq",
     "mode",
+    "gain",
+    "offset",
 ];
+
+/// Numeric targets accepted by `range` and `stepper` controls.
+const NUMERIC_TARGETS: [&str; 5] = ["ditherAmp", "ditherFreq", "mode", "gain", "offset"];
 
 fn default_digits() -> u8 {
     1
+}
+
+fn default_history() -> u16 {
+    60
+}
+
+fn default_segments() -> u8 {
+    20
+}
+
+fn kind_label(kind: ControlKind) -> &'static str {
+    match kind {
+        ControlKind::Toggle => "toggle",
+        ControlKind::Select => "select",
+        ControlKind::Range => "range",
+        ControlKind::Stepper => "stepper",
+        ControlKind::Knob => "knob",
+        ControlKind::Segmented => "segmented",
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -45,6 +78,11 @@ pub struct MonitorWidget {
     pub unit: String,
     pub digits: u8,
     pub description: String,
+    pub variant: MonitorVariant,
+    /// Number of samples kept by the `sparkline` variant.
+    pub history: u16,
+    /// Number of cells drawn by the `meter` variant.
+    pub segments: u8,
     pub range: Option<NumberRange>,
     pub threshold: Option<Threshold>,
 }
@@ -59,7 +97,20 @@ pub struct ControlWidget {
     pub unit: String,
     pub description: String,
     pub options: Vec<String>,
+    pub presets: Vec<f64>,
     pub range: Option<NumberRange>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorVariant {
+    #[default]
+    Bar,
+    Gauge,
+    Sparkline,
+    Led,
+    Tile,
+    Meter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +119,9 @@ pub enum ControlKind {
     Toggle,
     Select,
     Range,
+    Stepper,
+    Knob,
+    Segmented,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -115,6 +169,12 @@ struct RawMonitor {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    variant: MonitorVariant,
+    #[serde(default = "default_history")]
+    history: u16,
+    #[serde(default = "default_segments")]
+    segments: u8,
+    #[serde(default)]
     range: Option<RawRange>,
     #[serde(default)]
     threshold: Option<RawThreshold>,
@@ -135,6 +195,8 @@ struct RawControl {
     description: Option<String>,
     #[serde(default)]
     options: Vec<String>,
+    #[serde(default)]
+    presets: Vec<f64>,
     #[serde(default)]
     range: Option<RawRange>,
 }
@@ -234,6 +296,20 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             errors.push(format!("`{id}`: digits must be between 0 and 8"));
         }
 
+        if !(8..=600).contains(&raw.history) {
+            errors.push(format!(
+                "`{id}`: history must be between 8 and 600 samples (got {})",
+                raw.history
+            ));
+        }
+
+        if !(5..=40).contains(&raw.segments) {
+            errors.push(format!(
+                "`{id}`: segments must be between 5 and 40 (got {})",
+                raw.segments
+            ));
+        }
+
         monitors.push(MonitorWidget {
             label: raw
                 .label
@@ -245,6 +321,9 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             unit: raw.unit.unwrap_or_default(),
             digits: raw.digits.min(8),
             description: raw.description.unwrap_or_default(),
+            variant: raw.variant,
+            history: raw.history.clamp(8, 600),
+            segments: raw.segments.clamp(5, 40),
             range,
             threshold,
         });
@@ -274,12 +353,13 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             errors.push(format!("`{id}`: target `{target}` is already controlled"));
         }
 
-        let numeric_target = matches!(target.as_str(), "ditherAmp" | "ditherFreq" | "mode");
+        let numeric_target = NUMERIC_TARGETS.contains(&target.as_str());
 
         match raw.kind {
-            ControlKind::Toggle if target != "biasEnabled" => {
+            ControlKind::Toggle | ControlKind::Segmented if target != "biasEnabled" => {
                 errors.push(format!(
-                    "`{id}`: toggle controls can only target `biasEnabled`"
+                    "`{id}`: {} controls can only target `biasEnabled`",
+                    kind_label(raw.kind)
                 ));
             }
             ControlKind::Select if target != "biasPoint" && target != "mode" => {
@@ -287,9 +367,11 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
                     "`{id}`: select controls can only target `biasPoint` or `mode`"
                 ));
             }
-            ControlKind::Range if !numeric_target => {
+            ControlKind::Range | ControlKind::Stepper | ControlKind::Knob if !numeric_target => {
                 errors.push(format!(
-                    "`{id}`: range controls can only target `ditherAmp`, `ditherFreq` or `mode`"
+                    "`{id}`: {} controls can only target {}",
+                    kind_label(raw.kind),
+                    NUMERIC_TARGETS.join(", ")
                 ));
             }
             _ => {}
@@ -340,8 +422,49 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             }
         });
 
-        if raw.kind == ControlKind::Range && range.is_none() {
-            errors.push(format!("`{id}`: range controls need a `range` table"));
+        if matches!(
+            raw.kind,
+            ControlKind::Range | ControlKind::Stepper | ControlKind::Knob
+        ) && range.is_none()
+        {
+            errors.push(format!(
+                "`{id}`: {} controls need a `range` table",
+                kind_label(raw.kind)
+            ));
+        }
+
+        if !raw.presets.is_empty() {
+            if !matches!(
+                raw.kind,
+                ControlKind::Range | ControlKind::Stepper | ControlKind::Knob
+            ) {
+                errors.push(format!(
+                    "`{id}`: presets are only available on range, stepper and knob controls"
+                ));
+            }
+            if raw.presets.len() > 8 {
+                errors.push(format!("`{id}`: at most 8 presets are allowed"));
+            }
+            for preset in &raw.presets {
+                if !preset.is_finite() {
+                    errors.push(format!("`{id}`: presets must be finite"));
+                    continue;
+                }
+                if target == "mode" && (preset.fract() != 0.0 || !(0.0..=255.0).contains(preset)) {
+                    errors.push(format!(
+                        "`{id}`: mode presets must be integers from 0 to 255"
+                    ));
+                }
+                if let Some(range) = range {
+                    let min = range.min.min(range.max);
+                    let max = range.min.max(range.max);
+                    if *preset < min || *preset > max {
+                        errors.push(format!(
+                            "`{id}`: preset {preset} is outside the control range {min}…{max}"
+                        ));
+                    }
+                }
+            }
         }
 
         controls.push(ControlWidget {
@@ -356,6 +479,7 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             unit: raw.unit.unwrap_or_default(),
             description: raw.description.unwrap_or_default(),
             options: raw.options,
+            presets: raw.presets,
             range,
         });
     }
@@ -382,9 +506,163 @@ mod tests {
     #[test]
     fn parses_the_shipped_default() {
         let config = parse(DEFAULT_TOML).expect("default widget file must be valid");
-        assert_eq!(config.monitors.len(), 4);
-        assert_eq!(config.controls.len(), 5);
+        assert_eq!(config.monitors.len(), 8);
+        assert_eq!(config.controls.len(), 7);
         assert_eq!(config.monitors[0].source, "theta0");
+        assert_eq!(config.monitors[0].variant, MonitorVariant::Bar);
+        assert!(
+            config
+                .monitors
+                .iter()
+                .any(|m| m.variant == MonitorVariant::Gauge)
+        );
+        assert!(
+            config
+                .monitors
+                .iter()
+                .any(|m| m.variant == MonitorVariant::Led)
+        );
+        assert!(
+            config
+                .monitors
+                .iter()
+                .any(|m| m.variant == MonitorVariant::Meter)
+        );
+        assert!(
+            config
+                .monitors
+                .iter()
+                .any(|m| m.variant == MonitorVariant::Tile)
+        );
+        assert!(
+            config
+                .controls
+                .iter()
+                .any(|c| c.kind == ControlKind::Stepper)
+        );
+        assert!(config.controls.iter().any(|c| c.kind == ControlKind::Knob));
+    }
+
+    #[test]
+    fn parses_variant_history_and_presets() {
+        let config = parse(
+            r#"
+            [[monitors]]
+            id = "psu"
+            source = "supplyVoltage"
+            variant = "sparkline"
+            history = 120
+
+            [[controls]]
+            id = "offset"
+            kind = "stepper"
+            target = "offset"
+            range = { min = -5, max = 5, step = 0.1 }
+            presets = [-1, 0, 1]
+            "#,
+        )
+        .expect("layout must be valid");
+
+        assert_eq!(config.monitors[0].variant, MonitorVariant::Sparkline);
+        assert_eq!(config.monitors[0].history, 120);
+        assert_eq!(config.controls[0].presets, vec![-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn parses_meter_knob_and_segmented() {
+        let config = parse(
+            r#"
+            [[monitors]]
+            id = "level"
+            source = "inputPower"
+            variant = "meter"
+            segments = 24
+
+            [[controls]]
+            id = "gain"
+            kind = "knob"
+            target = "gain"
+            range = { min = 0, max = 4, step = 0.05 }
+            presets = [1, 2]
+
+            [[controls]]
+            id = "output"
+            kind = "segmented"
+            target = "biasEnabled"
+            "#,
+        )
+        .expect("layout must be valid");
+
+        assert_eq!(config.monitors[0].variant, MonitorVariant::Meter);
+        assert_eq!(config.monitors[0].segments, 24);
+        assert_eq!(config.controls[0].kind, ControlKind::Knob);
+        assert_eq!(config.controls[1].kind, ControlKind::Segmented);
+    }
+
+    #[test]
+    fn rejects_bad_segments_and_segmented_target() {
+        let errors = parse(
+            r#"
+            [[monitors]]
+            id = "level"
+            source = "inputPower"
+            segments = 2
+
+            [[controls]]
+            id = "amp"
+            kind = "segmented"
+            target = "ditherAmp"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(errors.iter().any(|error| error.contains("segments")));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("segmented") && error.contains("biasEnabled"))
+        );
+    }
+
+    #[test]
+    fn rejects_presets_outside_range() {
+        let errors = parse(
+            r#"
+            [[controls]]
+            id = "gain"
+            kind = "range"
+            target = "gain"
+            range = { min = 0, max = 10, step = 0.5 }
+            presets = [2, 20]
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("outside the control range"))
+        );
+    }
+
+    #[test]
+    fn rejects_bad_history_and_presets_on_toggle() {
+        let errors = parse(
+            r#"
+            [[monitors]]
+            id = "temp"
+            source = "temp"
+            history = 2
+
+            [[controls]]
+            id = "bias"
+            kind = "toggle"
+            target = "biasEnabled"
+            presets = [1]
+            "#,
+        )
+        .unwrap_err();
+        assert!(errors.iter().any(|error| error.contains("history")));
+        assert!(errors.iter().any(|error| error.contains("presets")));
     }
 
     #[test]
@@ -441,5 +719,49 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("already controlled"))
         );
+    }
+
+    fn documentation_toml_blocks(document: &str) -> Vec<(usize, String)> {
+        let mut blocks = Vec::new();
+        let mut current: Option<(usize, String)> = None;
+
+        for (index, line) in document.lines().enumerate() {
+            if let Some(info) = line.strip_prefix("```") {
+                if let Some(block) = current.take() {
+                    blocks.push(block);
+                } else if info.trim() == "toml" {
+                    current = Some((index + 1, String::new()));
+                }
+                continue;
+            }
+
+            if let Some((_, body)) = current.as_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+
+        assert!(current.is_none(), "unclosed TOML fence");
+        blocks
+    }
+
+    #[test]
+    fn parses_documentation_examples() {
+        for (name, document) in [
+            ("README.md", include_str!("../../README.md")),
+            ("docs/widgets.md", include_str!("../../docs/widgets.md")),
+        ] {
+            let blocks = documentation_toml_blocks(document);
+            assert!(!blocks.is_empty(), "{name} should contain TOML examples");
+
+            for (line, block) in blocks {
+                if let Err(errors) = parse(&block) {
+                    panic!(
+                        "{name} TOML block at line {line} is invalid:\n{}",
+                        errors.join("\n")
+                    );
+                }
+            }
+        }
     }
 }

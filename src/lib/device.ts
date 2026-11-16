@@ -14,6 +14,10 @@ export interface DeviceState {
   /** Dither frequency, Hz. */
   ditherFreq: number;
   mode: number;
+  /** Loop gain. */
+  gain: number;
+  /** Loop offset / trim. */
+  offset: number;
 }
 
 export interface PortInfo {
@@ -58,13 +62,32 @@ export interface Telemetry {
   inputPower: number | null;
   /** Output power. Unit is whatever the MCU reports (see `metrics.ts`). */
   outputPower: number | null;
+  /** Bias current, amperes. */
+  biasCurrent: number | null;
+  /** Supply rail voltage, volts. */
+  supplyVoltage: number | null;
+  /** Phase error, degrees. */
+  phaseError: number | null;
+  /** Loop lock flag reported as 0 or 1. */
+  lockStatus: number | null;
   /** Epoch ms of the most recent sample, or null before the first one. */
   updatedAt: number | null;
 }
 
-/** Payload shape for the (future) `telemetry://state` event from Rust. */
+/** Payload shape for the `telemetry://state` event from Rust. */
 export type TelemetrySample = Partial<
-  Pick<Telemetry, "theta0" | "temp" | "biasVoltage" | "inputPower" | "outputPower">
+  Pick<
+    Telemetry,
+    | "theta0"
+    | "temp"
+    | "biasVoltage"
+    | "inputPower"
+    | "outputPower"
+    | "biasCurrent"
+    | "supplyVoltage"
+    | "phaseError"
+    | "lockStatus"
+  >
 >;
 
 /** True when running inside a Tauri webview (not a plain browser tab). */
@@ -78,6 +101,8 @@ export const state = reactive<DeviceState>({
   ditherAmp: 0,
   ditherFreq: 1000,
   mode: 0,
+  gain: 1,
+  offset: 0,
 });
 
 /** Monitored values received from the MCU (read-only in the UI). */
@@ -87,6 +112,10 @@ export const telemetry = reactive<Telemetry>({
   biasVoltage: null,
   inputPower: null,
   outputPower: null,
+  biasCurrent: null,
+  supplyVoltage: null,
+  phaseError: null,
+  lockStatus: null,
   updatedAt: null,
 });
 
@@ -156,6 +185,8 @@ function snapshot(): DeviceState {
     ditherAmp: state.ditherAmp,
     ditherFreq: state.ditherFreq,
     mode: state.mode,
+    gain: state.gain,
+    offset: state.offset,
   };
 }
 

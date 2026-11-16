@@ -36,7 +36,9 @@ last good layout stays active until the file is fixed. `Save a copy…` creates 
 backup or a starting point.
 
 The bundled reference file lives at
-[`src-tauri/widgets.toml`](src-tauri/widgets.toml).
+[`src-tauri/widgets.toml`](src-tauri/widgets.toml). The full reference — every
+source, variant, target and control kind, validation rules, a complete starter
+layout and copy-paste examples — is in [`docs/widgets.md`](docs/widgets.md).
 
 ### Monitors
 
@@ -46,16 +48,32 @@ Monitors are read-only cards fed by inbound telemetry.
 [[monitors]]
 id = "temp"                 # unique id
 label = "Temperature"       # defaults to id
-source = "temp"             # theta0 | temp | biasVoltage | inputPower | outputPower
+source = "temp"             # theta0 | temp | biasVoltage | inputPower | outputPower |
+                            # biasCurrent | supplyVoltage | phaseError | lockStatus
+variant = "gauge"           # bar | gauge | sparkline | led | tile | meter (default: bar)
+history = 60                # samples kept by the sparkline variant (8..600)
+segments = 20               # cells drawn by the meter variant (5..40)
 unit = "°C"
 digits = 1
 description = "Board temperature"
-range = { min = 0, max = 100 }      # bar scale
+range = { min = 0, max = 100 }      # bar / gauge scale
 threshold = { low = 5, high = 75 }  # LOW / HIGH alarm; both keys optional
 ```
 
-`range` controls the bar; `threshold` controls the warning state. Threshold
-markers are drawn on the bar. Values outside a threshold turn the card amber.
+`range` controls the bar, gauge or meter; `threshold` controls the warning
+state. Threshold markers are drawn on the bar and meter. Values outside a
+threshold turn the card amber. `led` treats values ≥ 0.5 as ON, `sparkline`
+keeps the last `history` samples, `tile` is a compact numeric readout, and
+`bar` is the default card.
+
+| `variant`   | Rendering                                                        |
+| ----------- | ---------------------------------------------------------------- |
+| `bar`       | value, horizontal bar with threshold ticks (default)             |
+| `gauge`     | 270° radial gauge with threshold ticks                           |
+| `sparkline` | rolling trend chart, sized by `history`                          |
+| `led`       | large ON/OFF indicator for 0/1 signals                           |
+| `tile`      | compact numeric tile for dense layouts                           |
+| `meter`     | segmented level meter, sized by `segments`                       |
 
 ### Controls
 
@@ -65,21 +83,26 @@ Controls write to the device snapshot sent on every tick.
 [[controls]]
 id = "dither_amp"
 label = "Dither amplitude"
-kind = "range"              # toggle | select | range
+kind = "range"              # toggle | segmented | select | range | stepper | knob
 target = "ditherAmp"        # see the table below
 unit = "V"
 description = "Peak-to-peak dither amplitude"
 range = { min = 0, max = 10, step = 0.01 }
+presets = [0, 0.5, 1, 5]    # optional quick-set buttons
 ```
 
-| `kind`   | Allowed `target`             | Extra fields                        |
-| -------- | ---------------------------- | ----------------------------------- |
-| `toggle` | `biasEnabled`                | —                                   |
-| `select` | `biasPoint`, `mode`          | `options = ["QUAD+", "NULL", …]`    |
-| `range`  | `ditherAmp`, `ditherFreq`, `mode` | `range = { min, max, step }`   |
+| `kind`      | Allowed `target`                   | Extra fields                        |
+| ----------- | ---------------------------------- | ----------------------------------- |
+| `toggle`    | `biasEnabled`                      | —                                   |
+| `segmented` | `biasEnabled`                      | —                                   |
+| `select`    | `biasPoint`, `mode`                | `options = ["QUAD+", "NULL", …]`    |
+| `range`     | `ditherAmp`, `ditherFreq`, `mode`, `gain`, `offset` | `range`, optional `presets` |
+| `stepper`   | `ditherAmp`, `ditherFreq`, `mode`, `gain`, `offset` | `range`, optional `presets` |
+| `knob`      | `ditherAmp`, `ditherFreq`, `mode`, `gain`, `offset` | `range`, optional `presets` |
 
 Widget ids must be unique and a target can only be controlled once, so the
-config cannot create two sliders fighting over the same field.
+config cannot create two sliders fighting over the same field. Presets must lie
+inside the control range (at most 8 per control).
 
 ## Configuration-locked customer builds
 
@@ -111,11 +134,12 @@ The reader thread mirrors every inbound chunk to the Packet Lab and buffers
 lines for telemetry. The placeholder line format is:
 
 ```text
-TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\n
+TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 ibias=0.4 vsupply=12.1 phase=1.5 lock=1\n
 ```
 
 Accepted keys: `theta0`/`theta`, `temp`/`temperature`, `vbias`/`bias`,
-`pin`/`input`, `pout`/`output`. Unknown keys are ignored. Adjust
+`pin`/`input`, `pout`/`output`, `ibias`/`current`, `vsupply`/`supply`,
+`phase`/`perr`, `lock`/`locked`. Unknown keys are ignored. Adjust
 `src-tauri/src/protocol.rs` when the real MCU format is known.
 
 ## Packet Lab
@@ -137,14 +161,16 @@ The **Packet Lab** page has two halves:
 
 The schedule lives in the Rust backend, so the timing continues while you
 navigate to another page. Connect a serial port before starting a schedule;
-injection works without a link.
+injection works without a link. Switching a packet between TXT and HEX rewrites
+the payload so the transmitted bytes stay the same, and invalid payloads are
+rejected before sending or injecting.
 
 ## Wire protocol (outbound)
 
 The master writes one complete snapshot per tick (300 ms by default):
 
 ```text
-STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0\n
+STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0 gain=1.000 offset=0.000\n
 CAL seq=43\n
 ```
 
@@ -156,6 +182,8 @@ frames.
 ## Layout
 
 ```
+docs/
+  widgets.md           widget layout reference and examples
 src/
   lib/device.ts        serial state + telemetry mirror
   lib/widgets.ts       TOML layout types, loading and control binding
@@ -163,7 +191,7 @@ src/
   pages/main.vue       overview (monitor cards from TOML)
   pages/packets.vue    Packet Lab
   pages/settings.vue   layout file management + link defaults
-  components/          monitor card, control widget, bars, plot, logs
+  components/          monitor variants, control widgets, bars, plot, logs
 src-tauri/
   src/lib.rs           serial manager, reader, scheduler, commands
   src/config.rs        TOML schema + validation

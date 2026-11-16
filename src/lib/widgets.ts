@@ -12,16 +12,36 @@ export type MonitorSource =
   | "temp"
   | "biasVoltage"
   | "inputPower"
-  | "outputPower";
+  | "outputPower"
+  | "biasCurrent"
+  | "supplyVoltage"
+  | "phaseError"
+  | "lockStatus";
 
-export type ControlKind = "toggle" | "select" | "range";
+export type MonitorVariant =
+  | "bar"
+  | "gauge"
+  | "sparkline"
+  | "led"
+  | "tile"
+  | "meter";
+
+export type ControlKind =
+  | "toggle"
+  | "select"
+  | "range"
+  | "stepper"
+  | "knob"
+  | "segmented";
 
 export type ControlTarget =
   | "biasEnabled"
   | "biasPoint"
   | "ditherAmp"
   | "ditherFreq"
-  | "mode";
+  | "mode"
+  | "gain"
+  | "offset";
 
 export interface NumberRange {
   min: number;
@@ -41,6 +61,11 @@ export interface MonitorWidget {
   unit: string;
   digits: number;
   description: string;
+  variant: MonitorVariant;
+  /** Samples retained by the sparkline variant. */
+  history: number;
+  /** Cells drawn by the meter variant. */
+  segments: number;
   range: NumberRange | null;
   threshold: Threshold | null;
 }
@@ -53,6 +78,8 @@ export interface ControlWidget {
   unit: string;
   description: string;
   options: string[];
+  /** Quick-set values shown under range and stepper controls. */
+  presets: number[];
   range: NumberRange | null;
 }
 
@@ -95,6 +122,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "°",
         digits: 1,
         description: "Measured angle",
+        variant: "bar",
+        history: 60,
+        segments: 20,
         range: { min: -180, max: 180, step: null },
         threshold: { low: -90, high: 90 },
       },
@@ -105,6 +135,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "°C",
         digits: 1,
         description: "Board temperature",
+        variant: "gauge",
+        history: 60,
+        segments: 20,
         range: { min: 0, max: 100, step: null },
         threshold: { low: 5, high: 75 },
       },
@@ -115,6 +148,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "W",
         digits: 2,
         description: "Measured at input",
+        variant: "meter",
+        history: 60,
+        segments: 24,
         range: { min: 0, max: 100, step: null },
         threshold: { low: null, high: 90 },
       },
@@ -125,8 +161,63 @@ function fallbackConfig(): WidgetConfig {
         unit: "W",
         digits: 2,
         description: "Measured at output",
+        variant: "sparkline",
+        history: 60,
+        segments: 20,
         range: { min: 0, max: 100, step: null },
         threshold: { low: 5, high: 80 },
+      },
+      {
+        id: "bias_current",
+        label: "Bias current",
+        source: "biasCurrent",
+        unit: "A",
+        digits: 3,
+        description: "Current through the bias stage",
+        variant: "tile",
+        history: 60,
+        segments: 20,
+        range: { min: 0, max: 1, step: null },
+        threshold: { low: null, high: 0.8 },
+      },
+      {
+        id: "supply_voltage",
+        label: "Supply voltage",
+        source: "supplyVoltage",
+        unit: "V",
+        digits: 2,
+        description: "Rail feeding the output stage",
+        variant: "sparkline",
+        history: 60,
+        segments: 20,
+        range: { min: 0, max: 15, step: null },
+        threshold: { low: 11, high: 13 },
+      },
+      {
+        id: "phase_error",
+        label: "Phase error",
+        source: "phaseError",
+        unit: "°",
+        digits: 2,
+        description: "Residual loop phase error",
+        variant: "gauge",
+        history: 60,
+        segments: 20,
+        range: { min: -10, max: 10, step: null },
+        threshold: { low: -2, high: 2 },
+      },
+      {
+        id: "lock_status",
+        label: "Loop lock",
+        source: "lockStatus",
+        unit: "",
+        digits: 0,
+        description: "MCU reports a locked loop",
+        variant: "led",
+        history: 60,
+        segments: 20,
+        range: null,
+        threshold: null,
       },
     ],
     controls: [
@@ -138,6 +229,7 @@ function fallbackConfig(): WidgetConfig {
         unit: "",
         description: "Master enable for the bias stage",
         options: [],
+        presets: [],
         range: null,
       },
       {
@@ -148,6 +240,7 @@ function fallbackConfig(): WidgetConfig {
         unit: "",
         description: "Operating point of the bias loop",
         options: ["QUAD+", "QUAD-", "MAX", "NULL"],
+        presets: [],
         range: null,
       },
       {
@@ -158,6 +251,7 @@ function fallbackConfig(): WidgetConfig {
         unit: "V",
         description: "Peak-to-peak dither amplitude",
         options: [],
+        presets: [0, 0.5, 1, 5],
         range: { min: 0, max: 10, step: 0.01 },
       },
       {
@@ -168,6 +262,7 @@ function fallbackConfig(): WidgetConfig {
         unit: "Hz",
         description: "Dither tone frequency",
         options: [],
+        presets: [10, 100, 1000, 2500],
         range: { min: 1, max: 5000, step: 1 },
       },
       {
@@ -178,7 +273,30 @@ function fallbackConfig(): WidgetConfig {
         unit: "",
         description: "Mode code passed through to the MCU",
         options: ["0", "1", "2", "3"],
+        presets: [],
         range: null,
+      },
+      {
+        id: "gain",
+        label: "Loop gain",
+        kind: "knob",
+        target: "gain",
+        unit: "×",
+        description: "Error amplifier gain",
+        options: [],
+        presets: [0.5, 1, 2],
+        range: { min: 0, max: 4, step: 0.05 },
+      },
+      {
+        id: "offset",
+        label: "Loop offset",
+        kind: "stepper",
+        target: "offset",
+        unit: "V",
+        description: "Fine trim added to the bias setpoint",
+        options: [],
+        presets: [-1, 0, 1],
+        range: { min: -5, max: 5, step: 0.1 },
       },
     ],
   };
@@ -368,6 +486,10 @@ export function controlValue(
       return state.ditherFreq;
     case "mode":
       return state.mode;
+    case "gain":
+      return state.gain;
+    case "offset":
+      return state.offset;
   }
 }
 
@@ -417,6 +539,12 @@ export function setControlValue(
         0,
         Math.min(255, Math.round(clampToControl(control, Number(value)))),
       );
+      break;
+    case "gain":
+      state.gain = clampToControl(control, Number(value));
+      break;
+    case "offset":
+      state.offset = clampToControl(control, Number(value));
       break;
   }
 }

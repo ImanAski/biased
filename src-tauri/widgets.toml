@@ -17,11 +17,15 @@
 #    id          unique name for this widget
 #    label       card title (defaults to id)
 #    source      telemetry field: theta0 | temp | biasVoltage | inputPower |
-#                outputPower (defaults to id)
+#                outputPower | biasCurrent | supplyVoltage | phaseError |
+#                lockStatus (defaults to id)
+#    variant     bar | gauge | sparkline | led | tile | meter (default bar)
+#    history     samples kept by the sparkline variant (8..600, default 60)
+#    segments    cells drawn by the meter variant (5..40, default 20)
 #    unit        unit suffix shown next to the value
 #    digits      decimal places (default 1)
 #    description small caption under the value
-#    range       display range for the bar: { min = 0, max = 100 }
+#    range       display range: { min = 0, max = 100 }
 #    threshold   alarm limits:             { low = 10, high = 80 }
 #                Values outside low/high are highlighted as LOW / HIGH.
 #                Both keys are optional.
@@ -29,18 +33,23 @@
 #  Controls (writable, mirrored to the MCU every tick):
 #    id          unique name for this widget
 #    label       widget title (defaults to id)
-#    kind        toggle | select | range
+#    kind        toggle | select | range | stepper | knob | segmented
 #    target      device state field:
-#                  toggle -> biasEnabled
-#                  select -> biasPoint | mode
-#                  range  -> ditherAmp | ditherFreq | mode
-#    unit        unit suffix (range only)
+#                  toggle    -> biasEnabled
+#                  segmented -> biasEnabled
+#                  select    -> biasPoint | mode
+#                  range     -> ditherAmp | ditherFreq | mode | gain | offset
+#                  stepper   -> ditherAmp | ditherFreq | mode | gain | offset
+#                  knob      -> ditherAmp | ditherFreq | mode | gain | offset
+#    unit        unit suffix (numeric controls)
 #    description small caption
 #    options     select only, list of choices, e.g. ["QUAD+", "QUAD-"]
-#    range       range only: { min = 0, max = 10, step = 0.01 }
+#    presets     quick-set buttons for range/stepper/knob, e.g. [1, 10, 100]
+#    range       range/stepper/knob only: { min = 0, max = 10, step = 0.01 }
 #
 #  Telemetry lines the MCU can send back (see the Packet Lab page):
-#    TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\n
+#    TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 \
+#               ibias=0.4 vsupply=12.1 phase=1.5 lock=1\n
 # =============================================================================
 
 title = "MCU-04 · Bias stage"
@@ -53,6 +62,7 @@ label = "Θ₀"
 source = "theta0"
 unit = "°"
 digits = 1
+variant = "bar"
 description = "Measured angle"
 range = { min = -180, max = 180 }
 threshold = { low = -90, high = 90 }
@@ -63,6 +73,7 @@ label = "Temperature"
 source = "temp"
 unit = "°C"
 digits = 1
+variant = "gauge"
 description = "Board temperature"
 range = { min = 0, max = 100 }
 threshold = { low = 5, high = 75 }
@@ -73,6 +84,8 @@ label = "Input power"
 source = "inputPower"
 unit = "W"
 digits = 2
+variant = "meter"
+segments = 24
 description = "Measured at input"
 range = { min = 0, max = 100 }
 threshold = { high = 90 }
@@ -83,9 +96,52 @@ label = "Output power"
 source = "outputPower"
 unit = "W"
 digits = 2
+variant = "sparkline"
+history = 90
 description = "Measured at output"
 range = { min = 0, max = 100 }
 threshold = { low = 5, high = 80 }
+
+[[monitors]]
+id = "bias_current"
+label = "Bias current"
+source = "biasCurrent"
+unit = "A"
+digits = 3
+variant = "tile"
+description = "Current through the bias stage"
+range = { min = 0, max = 1 }
+threshold = { high = 0.8 }
+
+[[monitors]]
+id = "supply_voltage"
+label = "Supply voltage"
+source = "supplyVoltage"
+unit = "V"
+digits = 2
+variant = "sparkline"
+history = 120
+description = "Rail feeding the output stage"
+range = { min = 0, max = 15 }
+threshold = { low = 11, high = 13 }
+
+[[monitors]]
+id = "phase_error"
+label = "Phase error"
+source = "phaseError"
+unit = "°"
+digits = 2
+variant = "gauge"
+description = "Residual loop phase error"
+range = { min = -10, max = 10 }
+threshold = { low = -2, high = 2 }
+
+[[monitors]]
+id = "lock_status"
+label = "Loop lock"
+source = "lockStatus"
+variant = "led"
+description = "MCU reports a locked loop"
 
 # --------------------------------- Controls ----------------------------------
 
@@ -112,6 +168,7 @@ target = "ditherAmp"
 unit = "V"
 description = "Peak-to-peak dither amplitude"
 range = { min = 0, max = 10, step = 0.01 }
+presets = [0, 0.5, 1, 5]
 
 [[controls]]
 id = "dither_freq"
@@ -121,6 +178,7 @@ target = "ditherFreq"
 unit = "Hz"
 description = "Dither tone frequency"
 range = { min = 1, max = 5000, step = 1 }
+presets = [10, 100, 1000, 2500]
 
 [[controls]]
 id = "mode"
@@ -129,3 +187,23 @@ kind = "select"
 target = "mode"
 description = "Mode code passed through to the MCU"
 options = ["0", "1", "2", "3"]
+
+[[controls]]
+id = "gain"
+label = "Loop gain"
+kind = "knob"
+target = "gain"
+unit = "×"
+description = "Error amplifier gain"
+range = { min = 0, max = 4, step = 0.05 }
+presets = [0.5, 1, 2]
+
+[[controls]]
+id = "offset"
+label = "Loop offset"
+kind = "stepper"
+target = "offset"
+unit = "V"
+description = "Fine trim added to the bias setpoint"
+range = { min = -5, max = 5, step = 0.1 }
+presets = [-1, 0, 1]
