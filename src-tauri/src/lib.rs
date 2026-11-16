@@ -11,6 +11,7 @@
 //! interval, independently of the state tick.
 
 mod config;
+mod locking;
 mod protocol;
 
 use std::fs;
@@ -329,6 +330,93 @@ struct WidgetConfigEnvelope {
     path: String,
     config: Option<config::WidgetConfig>,
     errors: Vec<String>,
+}
+
+/// Build metadata for the settings page.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildInfo {
+    /// The executable carries its own layout and refuses to load another one.
+    locked: bool,
+    /// Customer exports are only meaningful from a production build.
+    debug: bool,
+    /// Where the embedded layout came from, when this is a locked build.
+    config_source: Option<String>,
+    /// Suggested file name for a new export.
+    export_name: String,
+}
+
+/// Result of writing a configuration-locked copy of the app.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportResult {
+    path: String,
+    bytes: u64,
+}
+
+/// Immutable lock status, resolved once at startup.
+struct BuildLock {
+    locked: bool,
+    source: String,
+    config: Option<String>,
+    error: Option<String>,
+}
+
+impl BuildLock {
+    fn load() -> Self {
+        let Some(path) = locking::executable_path() else {
+            return Self::unlocked();
+        };
+        let source = path.display().to_string();
+
+        match locking::read_from(&path) {
+            Some(Ok(config)) => Self {
+                locked: true,
+                source,
+                config: Some(config),
+                error: None,
+            },
+            // A malformed trailer still means "customer build": do not fall
+            // back to an editable file the customer could change.
+            Some(Err(error)) => Self {
+                locked: true,
+                source,
+                config: None,
+                error: Some(error),
+            },
+            None => Self::unlocked(),
+        }
+    }
+
+    fn unlocked() -> Self {
+        Self {
+            locked: false,
+            source: "embedded configuration".into(),
+            config: None,
+            error: None,
+        }
+    }
+}
+
+/// File name shown in the save dialog for a new customer build.
+fn export_name() -> String {
+    let source = locking::executable_path();
+    let base = source
+        .as_deref()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "tauri-biased".into());
+    let extension = source
+        .as_deref()
+        .and_then(|path| {
+            path.extension()
+                .map(|extension| format!(".{}", extension.to_string_lossy()))
+        })
+        .unwrap_or_else(|| std::env::consts::EXE_SUFFIX.into());
+
+    format!("{base}-customer{extension}")
 }
 
 /* -------------------------------------------------------------------------- */
@@ -874,11 +962,42 @@ fn default_widget_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// Load a widget layout from `path`, or from the app config directory when no
 /// path is supplied. The default file is created on first use.
+///
+/// A locked customer build ignores `path` entirely and always reports the
+/// layout embedded in its own executable.
 #[tauri::command]
 fn load_widget_config(
     path: Option<String>,
     app: AppHandle,
+    lock: State<'_, BuildLock>,
 ) -> Result<WidgetConfigEnvelope, String> {
+    if lock.locked {
+        let source = lock.source.clone();
+        return Ok(match lock.config.as_deref() {
+            Some(text) => match config::parse(text) {
+                Ok(config) => WidgetConfigEnvelope {
+                    path: source,
+                    config: Some(config),
+                    errors: Vec::new(),
+                },
+                Err(errors) => WidgetConfigEnvelope {
+                    path: source,
+                    config: None,
+                    errors,
+                },
+            },
+            None => WidgetConfigEnvelope {
+                path: source,
+                config: None,
+                errors: vec![
+                    lock.error
+                        .clone()
+                        .unwrap_or_else(|| "embedded configuration is unavailable".into()),
+                ],
+            },
+        });
+    }
+
     let path = match path.map(|value| value.trim().to_string()) {
         Some(value) if !value.is_empty() => PathBuf::from(value),
         _ => default_widget_path(&app)?,
@@ -899,6 +1018,67 @@ fn load_widget_config(
             errors,
         }),
     }
+}
+
+#[tauri::command]
+fn get_build_info(lock: State<'_, BuildLock>) -> BuildInfo {
+    BuildInfo {
+        locked: lock.locked,
+        debug: cfg!(debug_assertions),
+        config_source: lock.locked.then(|| lock.source.clone()),
+        export_name: export_name(),
+    }
+}
+
+/// Write a standalone copy of this executable with `config_path`'s layout
+/// embedded as an uneditable configuration.
+#[tauri::command]
+fn export_locked_build(
+    target: String,
+    config_path: Option<String>,
+    app: AppHandle,
+    lock: State<'_, BuildLock>,
+) -> Result<ExportResult, String> {
+    if lock.locked {
+        return Err("This executable is already a configuration-locked customer build.".into());
+    }
+    if cfg!(debug_assertions) {
+        return Err(
+            "Customer builds can only be exported from a production build. Run \
+             `bun run tauri build` and launch the built app instead."
+                .into(),
+        );
+    }
+
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("Choose a destination for the customer build.".into());
+    }
+    let target = PathBuf::from(target);
+
+    let source_path = match config_path.map(|value| value.trim().to_string()) {
+        Some(value) if !value.is_empty() && value != "built-in preview" => PathBuf::from(value),
+        _ => default_widget_path(&app)?,
+    };
+    let text = fs::read_to_string(&source_path)
+        .map_err(|error| format!("Failed to read {}: {error}", source_path.display()))?;
+
+    // Never distribute a build whose layout the app itself would reject.
+    config::parse(&text).map_err(|errors| {
+        format!(
+            "The active widget layout is invalid; fix it before exporting:\n{}",
+            errors.join("\n")
+        )
+    })?;
+
+    let executable = locking::executable_path()
+        .ok_or_else(|| "Cannot locate the running executable.".to_string())?;
+    let bytes = locking::write_copy(&executable, &target, &text)?;
+
+    Ok(ExportResult {
+        path: target.display().to_string(),
+        bytes,
+    })
 }
 
 /// One-shot write of a composed packet. Useful for testing and for commands
@@ -1075,7 +1255,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            if let Err(err) = default_widget_path(app.handle()) {
+            let lock = BuildLock::load();
+            let locked = lock.locked;
+            app.manage(lock);
+
+            // Locked builds never need (or create) an editable layout file.
+            if !locked && let Err(err) = default_widget_path(app.handle()) {
                 eprintln!("widget config: {err}");
             }
 
@@ -1095,6 +1280,8 @@ pub fn run() {
             write_text_file,
             read_text_file,
             load_widget_config,
+            get_build_info,
+            export_locked_build,
             send_packet,
             start_packet_sender,
             stop_packet_sender,

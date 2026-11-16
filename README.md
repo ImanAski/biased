@@ -81,6 +81,30 @@ range = { min = 0, max = 10, step = 0.01 }
 Widget ids must be unique and a target can only be controlled once, so the
 config cannot create two sliders fighting over the same field.
 
+## Configuration-locked customer builds
+
+Build a production app first (`bun run tauri build`) and launch that build. In
+*Settings → Customer build*, press **Export customer build…** and choose where
+to save it. The export is a standalone copy of the running executable with the
+active `widgets.toml` embedded in it.
+
+In a customer build:
+
+- the embedded layout is the only configuration, and any `widgets.toml` on the
+  customer's machine is ignored;
+- Reload, Open file, Use app default and Save a copy are unavailable;
+- the app refuses to load another layout even if the command is called
+  directly;
+- the status is shown as **configuration locked** in the side bar and Settings.
+
+The layout is validated before export, so a broken file cannot be shipped. The
+copy targets the current operating system, which means the production app must
+be built on the platform you intend to distribute. Exporting is disabled in
+debug builds because those depend on the Vite dev server. On Linux, both a
+plain binary and an AppImage can be used as the source. On macOS the export is
+the app's executable, so place it in a `.app` bundle and sign that bundle before
+distribution. If releases are code-signed, re-sign the exported copy as well.
+
 ## Inbound telemetry
 
 The reader thread mirrors every inbound chunk to the Packet Lab and buffers
@@ -143,6 +167,7 @@ src/
 src-tauri/
   src/lib.rs           serial manager, reader, scheduler, commands
   src/config.rs        TOML schema + validation
+  src/locking.rs       embedded config for customer builds
   src/protocol.rs      outbound encoding + telemetry parsing
   widgets.toml         bundled default layout
 ```

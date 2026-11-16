@@ -68,6 +68,18 @@ export interface WidgetConfigEnvelope {
   errors: string[];
 }
 
+export interface BuildInfo {
+  locked: boolean;
+  debug: boolean;
+  configSource: string | null;
+  exportName: string;
+}
+
+export interface LockedExport {
+  path: string;
+  bytes: number;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Built-in fallback (used in browser preview and before the file loads)      */
 /* -------------------------------------------------------------------------- */
@@ -181,6 +193,12 @@ export const configPath = ref<string>("built-in preview");
 export const configErrors = ref<string[]>([]);
 export const configLoading = ref(false);
 
+/** True when this executable carries an uneditable, embedded layout. */
+export const locked = ref(false);
+export const debugBuild = ref(false);
+export const configSource = ref<string | null>(null);
+export const exportName = ref("tauri-biased-customer");
+
 const STORAGE_KEY = "bias-controller.widgets-path";
 let initialized = false;
 
@@ -240,7 +258,7 @@ export async function loadWidgetConfig(
     widgetConfig.monitors = envelope.config.monitors;
     widgetConfig.controls = envelope.config.controls;
 
-    if (path) rememberPath(envelope.path);
+    if (path && !locked.value) rememberPath(envelope.path);
 
     if (!options.quiet) {
       addLog(
@@ -265,6 +283,25 @@ export async function initWidgets() {
   if (initialized) return;
   initialized = true;
 
+  if (inTauri) {
+    try {
+      const info = await invoke<BuildInfo>("get_build_info");
+      locked.value = info.locked;
+      debugBuild.value = info.debug;
+      configSource.value = info.configSource;
+      exportName.value = info.exportName;
+    } catch (err) {
+      addLog("warn", `Build information unavailable: ${String(err)}`);
+    }
+  }
+
+  // A customer build always uses its embedded layout; any remembered path on
+  // the machine is irrelevant.
+  if (locked.value) {
+    await loadWidgetConfig(null, { quiet: true });
+    return;
+  }
+
   const saved = storedPath();
   if (!saved) {
     await loadWidgetConfig(null, { quiet: true });
@@ -280,8 +317,28 @@ export async function initWidgets() {
 
 /** Load the app's own widgets.toml and forget any user-selected path. */
 export async function useDefaultConfig() {
+  if (locked.value) return loadWidgetConfig(null);
   rememberPath(null);
   return loadWidgetConfig(null);
+}
+
+/**
+ * Copy this executable to `target` with the active layout embedded.
+ *
+ * The backend refuses the operation in a locked build, in a debug build and
+ * when the layout fails validation.
+ */
+export function exportLockedBuild(target: string): Promise<LockedExport> {
+  const source = configPath.value;
+  const configPathArg =
+    source === "built-in preview" || source === "embedded configuration"
+      ? null
+      : source;
+
+  return invoke<LockedExport>("export_locked_build", {
+    target,
+    configPath: configPathArg,
+  });
 }
 
 /* -------------------------------------------------------------------------- */

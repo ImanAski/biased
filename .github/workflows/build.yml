@@ -84,6 +84,7 @@ jobs:
             Desktop bias controller for the MCU-04 bias stage.
 
             - TOML-driven monitor cards and controls
+            - Configuration-locked customer exports
             - Packet Lab for raw serial inspection and scheduling
             - 300 ms state frame telemetry loop
 

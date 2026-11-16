@@ -3,7 +3,7 @@ import Events from "../components/events.vue";
 import MonitorCard from "../components/monitor-card.vue";
 import Plot from "../components/Plot.vue";
 import { state, status } from "../lib/device";
-import { configErrors, monitorValue, widgetConfig } from "../lib/widgets";
+import { configErrors, locked, monitorValue, widgetConfig } from "../lib/widgets";
 </script>
 
 <template>
@@ -35,8 +35,13 @@ import { configErrors, monitorValue, widgetConfig } from "../lib/widgets";
     class="mb-4 rounded-2xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning"
   >
     Widget config has {{ configErrors.length }}
-    {{ configErrors.length === 1 ? "problem" : "problems" }}. Showing the last
-    good layout — fix it in Settings.
+    {{ configErrors.length === 1 ? "problem" : "problems" }}.
+    <template v-if="locked">
+      The layout embedded in this build is invalid — contact the supplier.
+    </template>
+    <template v-else>
+      Showing the last good layout — fix it in Settings.
+    </template>
   </div>
 
   <!-- Monitors are defined in widgets.toml and fed by inbound TLM lines. -->

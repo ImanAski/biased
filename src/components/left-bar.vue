@@ -2,13 +2,20 @@
 import MenuButton from "./menu-button.vue";
 import { currentView, navigate, views } from "../lib/nav";
 import { theme, toggleTheme } from "../lib/theme";
+import { locked } from "../lib/widgets";
 </script>
 
 <template>
   <div class="flex h-full min-w-80 flex-col space-y-3">
     <div class="flex flex-col space-y-1 px-3 pt-3">
       <span class="text-xl font-semibold text-ink">Bias Controller</span>
-      <span class="text-muted">desktop | v0.0.1a</span>
+      <span class="text-muted">desktop | v0.2.0</span>
+      <span
+        v-if="locked"
+        class="w-fit rounded-full bg-success/15 px-2 py-0.5 text-[11px] text-success"
+      >
+        configuration locked
+      </span>
     </div>
 
     <hr class="border-line" />

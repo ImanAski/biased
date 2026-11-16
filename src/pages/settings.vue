@@ -9,7 +9,12 @@ import {
   configErrors,
   configLoading,
   configPath,
+  configSource,
+  debugBuild,
+  exportLockedBuild,
+  exportName,
   loadWidgetConfig,
+  locked,
   useDefaultConfig,
   widgetConfig,
 } from "../lib/widgets";
@@ -19,8 +24,12 @@ const fieldClass =
 
 const busy = ref(false);
 const notice = ref<string | null>(null);
+const exportError = ref<string | null>(null);
 
 const isPreview = computed(() => configPath.value === "built-in preview");
+const canExport = computed(
+  () => inTauri && !locked.value && !debugBuild.value,
+);
 
 const actionClass =
   "rounded-lg border border-line px-3 py-2 text-sm text-muted transition hover:border-line-strong hover:text-ink disabled:opacity-40";
@@ -105,6 +114,32 @@ async function saveCopy() {
   }
 }
 
+async function exportCustomerBuild() {
+  if (!canExport.value) return;
+  exportError.value = null;
+  busy.value = true;
+  try {
+    const target = await save({
+      title: "Export configuration-locked build",
+      defaultPath: exportName.value,
+    });
+    if (!target) return;
+
+    const result = await exportLockedBuild(target);
+    addLog(
+      "info",
+      `Customer build exported: ${result.path} (${result.bytes.toLocaleString()} bytes)`,
+    );
+    flash("Customer build exported");
+  } catch (err) {
+    const message = String(err);
+    exportError.value = message;
+    addLog("error", `Customer build export failed: ${message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
 function resetDefaults() {
   resetSettings();
   addLog("info", "Settings reset to defaults");
@@ -120,6 +155,76 @@ function resetDefaults() {
       >
     </div>
 
+    <!-- Customer build -->
+    <section class="space-y-3 rounded-2xl border border-line bg-panel p-5">
+      <div class="flex items-start justify-between gap-3">
+        <div class="flex flex-col">
+          <span class="text-xs font-bold uppercase text-muted"
+            >Customer build</span
+          >
+          <p class="text-xs text-faint">
+            Package the current layout into a standalone executable that
+            customers can use but cannot reconfigure.
+          </p>
+        </div>
+        <span
+          class="shrink-0 rounded-full px-2 py-0.5 text-[11px]"
+          :class="
+            locked
+              ? 'bg-success/15 text-success'
+              : 'bg-faint/20 text-muted'
+          "
+        >
+          {{ locked ? "configuration locked" : "editable" }}
+        </span>
+      </div>
+
+      <template v-if="locked">
+        <p class="text-sm text-muted">
+          This executable carries its layout internally. Opening, reloading and
+          saving a different <code class="text-ink">widgets.toml</code> are
+          disabled.
+        </p>
+        <p class="break-all text-xs text-faint">
+          Executable: <code>{{ configSource ?? configPath }}</code>
+        </p>
+      </template>
+
+      <template v-else>
+        <p class="text-sm text-muted">
+          The export is a copy of this executable with the active
+          <code class="text-ink">widgets.toml</code> embedded. The layout cannot
+          be replaced in the copy, so the customer always gets exactly this
+          configuration.
+        </p>
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            :class="actionClass"
+            :disabled="busy || !canExport"
+            @click="exportCustomerBuild"
+          >
+            Export customer build…
+          </button>
+          <span v-if="!inTauri" class="text-xs text-faint">
+            Available in the desktop app.
+          </span>
+          <span v-else-if="debugBuild" class="text-xs text-faint">
+            Available in a production build — run
+            <code>bun run tauri build</code> and launch the built app.
+          </span>
+          <span v-else class="text-xs text-faint">
+            Creates an executable for this operating system.
+          </span>
+        </div>
+        <p
+          v-if="exportError"
+          class="whitespace-pre-wrap rounded-xl border border-danger/30 bg-danger/10 p-3 text-xs text-danger"
+        >
+          {{ exportError }}
+        </p>
+      </template>
+    </section>
+
     <!-- Widget layout -->
     <section class="space-y-3 rounded-2xl border border-line bg-panel p-5">
       <div class="flex items-start justify-between gap-3">
@@ -128,9 +233,15 @@ function resetDefaults() {
             >Widget layout</span
           >
           <p class="text-xs text-faint">
-            Monitor cards and controls are declared in
-            <code class="text-ink">widgets.toml</code>. Edit the file, then
-            press Reload.
+            <template v-if="locked">
+              This build uses the layout embedded in its executable; it cannot
+              be edited.
+            </template>
+            <template v-else>
+              Monitor cards and controls are declared in
+              <code class="text-ink">widgets.toml</code>. Edit the file, then
+              press Reload.
+            </template>
           </p>
         </div>
         <span
@@ -145,39 +256,41 @@ function resetDefaults() {
         </span>
       </div>
 
-      <div
-        class="flex items-center gap-2 rounded-xl border border-line bg-field px-3 py-2"
-      >
-        <code class="min-w-0 flex-1 break-all font-mono text-xs text-muted">{{
-          configPath
-        }}</code>
-        <button
-          class="shrink-0 rounded px-2 py-1 text-xs text-muted transition hover:text-ink"
-          title="Copy path"
-          @click="copyPath"
+      <template v-if="!locked">
+        <div
+          class="flex items-center gap-2 rounded-xl border border-line bg-field px-3 py-2"
         >
-          Copy
-        </button>
-      </div>
+          <code class="min-w-0 flex-1 break-all font-mono text-xs text-muted">{{
+            configPath
+          }}</code>
+          <button
+            class="shrink-0 rounded px-2 py-1 text-xs text-muted transition hover:text-ink"
+            title="Copy path"
+            @click="copyPath"
+          >
+            Copy
+          </button>
+        </div>
 
-      <div class="flex flex-wrap gap-2">
-        <button :class="actionClass" :disabled="busy" @click="reloadConfig">
-          {{ configLoading ? "Loading…" : "Reload" }}
-        </button>
-        <button :class="actionClass" :disabled="busy" @click="openConfig">
-          Open file…
-        </button>
-        <button :class="actionClass" :disabled="busy" @click="restoreDefault">
-          Use app default
-        </button>
-        <button
-          :class="actionClass"
-          :disabled="busy || isPreview"
-          @click="saveCopy"
-        >
-          Save a copy…
-        </button>
-      </div>
+        <div class="flex flex-wrap gap-2">
+          <button :class="actionClass" :disabled="busy" @click="reloadConfig">
+            {{ configLoading ? "Loading…" : "Reload" }}
+          </button>
+          <button :class="actionClass" :disabled="busy" @click="openConfig">
+            Open file…
+          </button>
+          <button :class="actionClass" :disabled="busy" @click="restoreDefault">
+            Use app default
+          </button>
+          <button
+            :class="actionClass"
+            :disabled="busy || isPreview"
+            @click="saveCopy"
+          >
+            Save a copy…
+          </button>
+        </div>
+      </template>
 
       <div class="flex flex-wrap gap-4 text-xs text-muted">
         <span>
@@ -198,7 +311,12 @@ function resetDefaults() {
         class="space-y-1 rounded-xl border border-warning/40 bg-warning/10 p-3"
       >
         <p class="text-xs font-semibold text-warning">
-          The file was rejected — the last good layout is still active.
+          <template v-if="locked">
+            The embedded layout was rejected — contact the supplier.
+          </template>
+          <template v-else>
+            The file was rejected — the last good layout is still active.
+          </template>
         </p>
         <ul class="list-inside list-disc space-y-0.5 font-mono text-[11px] text-warning">
           <li
@@ -256,7 +374,7 @@ function resetDefaults() {
       </div>
       <div class="flex justify-between text-sm">
         <span class="text-muted">Application</span>
-        <span class="text-ink">v0.0.1a</span>
+        <span class="text-ink">v0.2.0</span>
       </div>
     </section>
 
