@@ -1,9 +1,12 @@
 # Bias Controller
 
 Desktop master application for the MCU-04 bias stage. It owns the serial clock,
-streams a state frame every 300 ms, renders telemetry monitor cards and exposes
-controls — both declared in a TOML file — and includes a packet lab for
-inspecting inbound bytes and scheduling raw outbound packets.
+polls the MCU with a query frame every 300 ms, renders telemetry monitor cards
+and exposes controls — both declared in a TOML file — and, in the editor build,
+includes a packet lab for inspecting inbound bytes and scheduling raw outbound
+packets. Command packets (state snapshots and calibration) are sent on demand
+when the user clicks the corresponding action. The packet lab is not available
+in a configuration-locked customer build.
 
 Built with Tauri 2, Vue 3, Vite, Tailwind CSS 4 and Rust.
 
@@ -77,7 +80,7 @@ keeps the last `history` samples, `tile` is a compact numeric readout, and
 
 ### Controls
 
-Controls write to the device snapshot sent on every tick.
+Controls update the command snapshot that is sent when the user clicks **Send command**.
 
 ```toml
 [[controls]]
@@ -118,6 +121,7 @@ In a customer build:
 - Reload, Open file, Use app default and Save a copy are unavailable;
 - the app refuses to load another layout even if the command is called
   directly;
+- the Packet Lab page and its packet commands are unavailable;
 - the status is shown as **configuration locked** in the side bar and Settings.
 
 The layout is validated before export, so a broken file cannot be shipped. The
@@ -144,56 +148,84 @@ Accepted keys: `theta0`/`theta`, `temp`/`temperature`, `vbias`/`bias`,
 
 ## Packet Lab
 
-The **Packet Lab** page has two halves:
+The **Packet Lab** is an editor-only page with two halves. It is omitted from
+configuration-locked customer builds.
 
 - **Inbound stream** — live chunks with timestamp, inter-packet delta, length and
   hex/ASCII preview. Filter by hex, ASCII, sequence or time, pause capture,
-  follow the tail, and click a chunk for a full 16-byte hex dump. Injected
-  chunks are marked `SIM`.
-- **Packet composer** — an ordered list of raw packets. Each packet is text
-  (with `\n`, `\r`, `\t`, `\\`, `\0`, `\xNN` escapes) or hex (spaces, commas and
-  `0x` prefixes are fine). A configurable interval (default **300 ms**) writes
-  one packet per tick in list order. The countdown ring shows the next send,
-  and the TX cadence strip visualises recent sends. Optional “stop after N”
-  limits a burst.
-- **Inject** feeds a composed packet through the inbound path. This drives the
+  follow the tail, and click a chunk for a full 16-byte hex dump plus a
+  structure panel: text/binary balance, line framing, complete lines, command
+  tag and `key=value` fields. Injected chunks are marked `SIM`.
+- **Packet script** — one packet per line, sent in top-to-bottom order:
+
+  ```text
+  # Comments start with # or //.
+  Ping => PING\n
+  TLM sample => TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\n
+  Cal => [hex] 01 02 A0 FF
+  Note => [raw] C:\logs\raw.txt
+  Live => STATE seq={seq} bp={biasPoint} temp={temp:.2|0.0}\n
+  ```
+
+  A label is optional. `[text]` is the default; `[hex]` accepts spaces, commas
+  and `0x` prefixes; `[raw]` sends UTF-8 without escape processing. Text
+  supports `\n`, `\r`, `\t`, `\0`, `\\` and `\xNN`. Invalid lines are reported
+  with their line number and are never sent. A configurable interval (default
+  **300 ms**) writes one packet per tick. The countdown ring shows the next
+  send, and the TX cadence strip visualises recent sends. Optional “stop after
+  N” limits a burst.
+- **Templates** — `{name}` placeholders are expanded at send time from live
+  state and telemetry, including on every scheduled frame. Use `{temp:.2}` for
+  a float, `{seq:04}` for a padded integer and `{temp|0.0}` for a fallback
+  before the first sample. Write `{{` and `}}` for literal braces.
+- **Inject** feeds a parsed packet through the inbound path. This drives the
   Packet Lab and monitor cards without hardware — useful for UI testing.
 
 The schedule lives in the Rust backend, so the timing continues while you
 navigate to another page. Connect a serial port before starting a schedule;
-injection works without a link. Switching a packet between TXT and HEX rewrites
-the payload so the transmitted bytes stay the same, and invalid payloads are
-rejected before sending or injecting.
+injection works without a link. A running schedule keeps its packet definitions
+but re-expands templates on every send; stop and start again to change the
+definitions. See [`docs/packets.md`](docs/packets.md) for the full format,
+template variables and the backend packet structure.
 
 ## Wire protocol (outbound)
 
-The master writes one complete snapshot per tick (300 ms by default):
+The master polls the MCU on every tick (300 ms by default) and sends command
+frames on demand. In the default **text (ASCII)** format:
 
 ```text
+QUERY seq=41\n
 STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0 gain=1.000 offset=0.000\n
 CAL seq=43\n
 ```
 
-All bytes leaving the port are produced by `encode_state` and
-`encode_calibrate` in [`src-tauri/src/protocol.rs`](src-tauri/src/protocol.rs).
-Scheduled Packet Lab payloads are written verbatim between regular state
-frames.
+`QUERY` is the periodic polling frame. `STATE` is sent when the user clicks
+**Send command**, and `CAL` is sent when the user clicks **Calibrate**. In
+editable (editor) builds, *Settings → Serial defaults → Wire format* can switch
+master-generated query/command frames between **Text (ASCII)** and **Binary
+(placeholder)**; customer builds use a fixed format. All bytes leaving the port
+are produced by `encode_query`, `encode_state` and `encode_calibrate` in
+[`src-tauri/src/protocol.rs`](src-tauri/src/protocol.rs). Scheduled Packet Lab
+payloads are template-expanded, encoded and then written independently of the
+periodic query tick.
 
 ## Layout
 
 ```
 docs/
   widgets.md           widget layout reference and examples
+  packets.md           packet structure, text script and customer-build rules
 src/
   lib/device.ts        serial state + telemetry mirror
   lib/widgets.ts       TOML layout types, loading and control binding
-  lib/packets.ts       RX buffer, packet composer and scheduler state
+  lib/packets.ts       RX buffer, packet script parser and scheduler state
   pages/main.vue       overview (monitor cards from TOML)
-  pages/packets.vue    Packet Lab
+  pages/packets.vue    Packet Lab (editor builds only)
   pages/settings.vue   layout file management + link defaults
   components/          monitor variants, control widgets, bars, plot, logs
 src-tauri/
   src/lib.rs           serial manager, reader, scheduler, commands
+  src/template.rs      packet placeholder expansion
   src/config.rs        TOML schema + validation
   src/locking.rs       embedded config for customer builds
   src/protocol.rs      outbound encoding + telemetry parsing

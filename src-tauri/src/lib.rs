@@ -1,18 +1,21 @@
 //! Tauri backend for the bias controller.
 //!
 //! This app is the **master** on the serial link: a background thread wakes up
-//! every [`TICK_MS`] and writes the latest [`DeviceState`] snapshot to the MCU.
-//! The frontend never owns the clock; it only pushes state changes through the
-//! `set_state` command, and the loop picks the newest snapshot on its next tick.
+//! every [`TICK_MS`] and writes a query frame to poll the MCU for telemetry.
+//! Command frames (state snapshots and calibration requests) are sent on demand
+//! when the user explicitly triggers them; the frontend pushes state changes
+//! through the `set_state` command so the latest snapshot is ready when a command
+//! is sent.
 //!
 //! A reader thread mirrors inbound bytes to the Packet Lab page and parses
 //! telemetry lines for the monitor cards. The Packet Lab can also start a
 //! separate packet scheduler that writes arbitrary payloads at a configurable
-//! interval, independently of the state tick.
+//! interval, independently of the query tick.
 
 mod config;
 mod locking;
 mod protocol;
+mod template;
 
 use std::fs;
 use std::io::{Read, Write};
@@ -27,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serialport::{SerialPort, SerialPortType};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-/// Master clock period. The MCU expects a fresh state frame this often.
+/// Master clock period. The app polls the MCU for telemetry this often.
 const TICK_MS: u64 = 300;
 
 /// Read/write timeout for the serial handle. Short enough that the reader
@@ -51,6 +54,13 @@ struct Inner {
     port_name: Option<String>,
     baud: u32,
     last_error: Option<String>,
+    /// Newest telemetry sample, merged from sparse `TLM` lines. Packet
+    /// templates read this so scheduled packets stay in sync with the MCU.
+    telemetry: protocol::TelemetryPatch,
+    /// Counter for raw Packet Lab writes, exposed to templates as `{seq}`.
+    packet_seq: u64,
+    /// Outbound wire format for master-generated query/command frames.
+    wire_format: protocol::WireFormat,
     reader_stop: Option<Arc<AtomicBool>>,
     reader_handle: Option<JoinHandle<()>>,
     sender_stop: Option<Arc<AtomicBool>>,
@@ -69,6 +79,9 @@ impl Inner {
             port_name: None,
             baud: 115_200,
             last_error: None,
+            telemetry: protocol::TelemetryPatch::default(),
+            packet_seq: 0,
+            wire_format: protocol::WireFormat::Text,
             reader_stop: None,
             reader_handle: None,
             sender_stop: None,
@@ -187,7 +200,7 @@ impl SerialManager {
                 }
 
                 inner.seq = inner.seq.wrapping_add(1);
-                let frame = protocol::encode_state(inner.seq, &inner.state);
+                let frame = protocol::encode_query(inner.seq, inner.wire_format);
 
                 let result = match inner.port.as_mut() {
                     Some(port) => port.write_all(&frame).and_then(|()| port.flush()),
@@ -242,7 +255,7 @@ struct Status {
     tick_ms: u64,
 }
 
-/// Emitted after every successful state frame so the UI can show a heartbeat.
+/// Emitted after every successful periodic frame so the UI can show a heartbeat.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TxEvent {
@@ -305,6 +318,9 @@ struct PacketSent {
     at: u64,
     label: String,
     index: usize,
+    /// Counter value carried by this write, also exposed to templates as
+    /// `{seq}`. The editor uses it to preview the next packet accurately.
+    seq: u64,
     bytes: usize,
     sent: u64,
     txs: u64,
@@ -338,6 +354,8 @@ struct WidgetConfigEnvelope {
 struct BuildInfo {
     /// The executable carries its own layout and refuses to load another one.
     locked: bool,
+    /// Developer tools (Packet Lab) are available only in editable builds.
+    packet_lab: bool,
     /// Customer exports are only meaningful from a production build.
     debug: bool,
     /// Where the embedded layout came from, when this is a locked build.
@@ -398,6 +416,16 @@ impl BuildLock {
     }
 }
 
+/// The Packet Lab is an editor tool and is deliberately unavailable in a
+/// configuration-locked customer build.
+fn ensure_packet_lab(lock: &BuildLock) -> Result<(), String> {
+    if lock.locked {
+        Err("The Packet Lab is not available in a customer build.".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// File name shown in the save dialog for a new customer build.
 fn export_name() -> String {
     let source = locking::executable_path();
@@ -429,6 +457,8 @@ pub enum PacketEncoding {
     #[default]
     Text,
     Hex,
+    /// UTF-8 text sent verbatim, with no escape processing.
+    Raw,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -448,13 +478,6 @@ impl PacketSpec {
             format!("packet {}", index + 1)
         } else {
             label.to_string()
-        }
-    }
-
-    fn decode(&self) -> Result<Vec<u8>, String> {
-        match self.encoding {
-            PacketEncoding::Text => decode_text(&self.payload),
-            PacketEncoding::Hex => decode_hex(&self.payload),
         }
     }
 }
@@ -538,6 +561,47 @@ fn decode_hex(payload: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Expand a packet template against the live state and decode it.
+///
+/// Expansion happens at send time so a scheduled packet can follow telemetry
+/// and device state instead of freezing the values when the schedule starts.
+fn render_packet(
+    packet: &PacketSpec,
+    inner: &Inner,
+    seq: u64,
+    sent: u64,
+    index: usize,
+) -> Result<Vec<u8>, String> {
+    let label = packet.label_or(index);
+    let vars = template::TemplateVars {
+        seq,
+        sent,
+        index,
+        label: &label,
+        now_ms: epoch_ms(),
+        state: &inner.state,
+        telemetry: &inner.telemetry,
+    };
+    let payload =
+        template::expand(&packet.payload, &vars).map_err(|err| format!("{label}: {err}"))?;
+
+    let bytes = match packet.encoding {
+        PacketEncoding::Text => decode_text(&payload),
+        PacketEncoding::Hex => decode_hex(&payload),
+        PacketEncoding::Raw => Ok(payload.into_bytes()),
+    }
+    .map_err(|err| format!("{label}: {err}"))?;
+
+    if bytes.is_empty() {
+        return Err(format!("{label}: payload is empty"));
+    }
+    if bytes.len() > 8192 {
+        return Err(format!("{label}: payload is larger than 8 KiB"));
+    }
+
+    Ok(bytes)
+}
+
 /* -------------------------------------------------------------------------- */
 /* Inbound path                                                               */
 /* -------------------------------------------------------------------------- */
@@ -573,7 +637,7 @@ fn spawn_reader(
                     line.extend_from_slice(chunk);
                     while let Some(position) = line.iter().position(|byte| *byte == b'\n') {
                         let raw: Vec<u8> = line.drain(..=position).collect();
-                        parse_and_emit_telemetry(&app, &raw);
+                        parse_and_emit_telemetry(&app, &shared, &raw);
                     }
                     if line.len() > MAX_LINE {
                         line.clear();
@@ -620,9 +684,13 @@ fn emit_rx(app: &AppHandle, shared: &Arc<Mutex<Inner>>, bytes: &[u8], synthetic:
     );
 }
 
-fn parse_and_emit_telemetry(app: &AppHandle, raw: &[u8]) {
+fn parse_and_emit_telemetry(app: &AppHandle, shared: &Arc<Mutex<Inner>>, raw: &[u8]) {
     let text = String::from_utf8_lossy(raw);
     if let Some(patch) = protocol::parse_telemetry_line(&text) {
+        {
+            let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+            inner.telemetry.merge(&patch);
+        }
         let _ = app.emit("telemetry://state", patch);
     }
 }
@@ -634,7 +702,7 @@ fn ingest_bytes(app: &AppHandle, shared: &Arc<Mutex<Inner>>, bytes: &[u8], synth
 
     for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
         if !raw.is_empty() {
-            parse_and_emit_telemetry(app, raw);
+            parse_and_emit_telemetry(app, shared, raw);
         }
     }
 }
@@ -661,7 +729,7 @@ fn spawn_sender(
     shared: Arc<Mutex<Inner>>,
     stop: Arc<AtomicBool>,
     interval_ms: u64,
-    frames: Vec<(String, Vec<u8>)>,
+    packets: Vec<PacketSpec>,
     limit: u64,
 ) {
     thread::spawn(move || {
@@ -675,13 +743,12 @@ fn spawn_sender(
                 return;
             }
 
-            let (label, payload) = &frames[index];
-            let label = label.clone();
             let send_index = index;
+            let label = packets[index].label_or(index);
 
             enum Step {
-                Sent(SenderState, u64),
-                Failed(SenderState, Status),
+                Sent(SenderState, u64, usize, u64),
+                Failed(SenderState, Option<Status>),
             }
 
             let step = {
@@ -692,34 +759,49 @@ fn spawn_sender(
                     inner.sender.last_error = Some("not connected".into());
                     inner.sender_stop = None;
                     inner.last_error = Some("not connected".into());
-                    Step::Failed(inner.sender.clone(), inner.status())
+                    Step::Failed(inner.sender.clone(), Some(inner.status()))
                 } else {
-                    match inner.write_immediate(payload) {
-                        Ok(()) => {
-                            inner.sender.sent += 1;
-                            inner.sender.next_at = Some(epoch_ms().saturating_add(interval_ms));
-                            Step::Sent(inner.sender.clone(), inner.txs)
-                        }
+                    // Render under the lock so the template sees one consistent
+                    // snapshot and `{seq}` stays unique across writers.
+                    let seq = inner.packet_seq.wrapping_add(1);
+                    let sent = inner.sender.sent.saturating_add(1);
+                    match render_packet(&packets[index], &inner, seq, sent, index) {
                         Err(err) => {
                             inner.sender.running = false;
                             inner.sender.next_at = None;
                             inner.sender.last_error = Some(err);
                             inner.sender_stop = None;
-                            Step::Failed(inner.sender.clone(), inner.status())
+                            Step::Failed(inner.sender.clone(), None)
                         }
+                        Ok(payload) => match inner.write_immediate(&payload) {
+                            Ok(()) => {
+                                inner.packet_seq = seq;
+                                inner.sender.sent += 1;
+                                inner.sender.next_at = Some(epoch_ms().saturating_add(interval_ms));
+                                Step::Sent(inner.sender.clone(), inner.txs, payload.len(), seq)
+                            }
+                            Err(err) => {
+                                inner.sender.running = false;
+                                inner.sender.next_at = None;
+                                inner.sender.last_error = Some(err);
+                                inner.sender_stop = None;
+                                Step::Failed(inner.sender.clone(), Some(inner.status()))
+                            }
+                        },
                     }
                 }
             };
 
             match step {
-                Step::Sent(state, txs) => {
+                Step::Sent(state, txs, bytes, seq) => {
                     let _ = app.emit(
                         "serial://packet",
                         PacketSent {
                             at: epoch_ms(),
                             label,
                             index: send_index,
-                            bytes: payload.len(),
+                            seq,
+                            bytes,
                             sent: state.sent,
                             txs,
                             interval_ms,
@@ -739,7 +821,7 @@ fn spawn_sender(
                     }
 
                     let _ = app.emit("serial://sender", state);
-                    index = (index + 1) % frames.len();
+                    index = (index + 1) % packets.len();
                     next += interval;
                     if next < Instant::now() {
                         next = Instant::now() + interval;
@@ -747,7 +829,9 @@ fn spawn_sender(
                 }
                 Step::Failed(state, status) => {
                     let _ = app.emit("serial://sender", state);
-                    let _ = app.emit("serial://status", status);
+                    if let Some(status) = status {
+                        let _ = app.emit("serial://status", status);
+                    }
                     return;
                 }
             }
@@ -882,7 +966,8 @@ fn disconnect(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Statu
     Ok(status)
 }
 
-/// Replace the snapshot that the 300 ms loop will send on its next tick.
+/// Replace the command snapshot that will be sent when the user explicitly
+/// triggers a command transmission.
 #[tauri::command]
 fn set_state(state: DeviceState, manager: State<'_, SerialManager>) -> Result<(), String> {
     manager.lock().state = state;
@@ -894,34 +979,57 @@ fn get_status(manager: State<'_, SerialManager>) -> Result<Status, String> {
     Ok(manager.lock().status())
 }
 
-/// Write the current snapshot immediately, outside the normal tick.
+#[tauri::command]
+fn get_wire_format(manager: State<'_, SerialManager>) -> protocol::WireFormat {
+    manager.lock().wire_format
+}
+
+#[tauri::command]
+fn set_wire_format(
+    format: protocol::WireFormat,
+    manager: State<'_, SerialManager>,
+    lock: State<'_, BuildLock>,
+) -> Result<(), String> {
+    if lock.locked {
+        return Err("Wire format cannot be changed in a customer build.".into());
+    }
+    manager.lock().wire_format = format;
+    Ok(())
+}
+
+/// Send the current command snapshot immediately, outside the periodic query tick.
 ///
-/// Useful for testing the link or for one-shot commands that must not wait up
-/// to 300 ms. It does not reset or interfere with the periodic loop.
+/// Useful for applying state changes on demand without waiting for the next poll.
+/// It does not reset or interfere with the periodic query loop.
 #[tauri::command]
 fn send_now(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status, String> {
     let mut inner = manager.lock();
 
     inner.seq = inner.seq.wrapping_add(1);
-    let frame = protocol::encode_state(inner.seq, &inner.state);
+    let frame = protocol::encode_state(inner.seq, &inner.state, inner.wire_format);
     if let Err(err) = inner.write_immediate(&frame) {
         let status = inner.status();
         let _ = app.emit("serial://status", status);
         return Err(err);
     }
 
+    let seq = inner.seq;
+    let txs = inner.txs;
     let status = inner.status();
+    drop(inner);
+
+    let _ = app.emit("serial://tx", TxEvent { seq, txs });
     let _ = app.emit("serial://status", status.clone());
     Ok(status)
 }
 
-/// Ask the MCU to run its calibration routine.
+/// Ask the MCU to run its calibration routine by sending a one-shot command.
 #[tauri::command]
 fn calibrate(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status, String> {
     let mut inner = manager.lock();
 
     inner.seq = inner.seq.wrapping_add(1);
-    let frame = protocol::encode_calibrate(inner.seq);
+    let frame = protocol::encode_calibrate(inner.seq, inner.wire_format);
     if let Err(err) = inner.write_immediate(&frame) {
         let status = inner.status();
         let _ = app.emit("serial://status", status);
@@ -1024,6 +1132,7 @@ fn load_widget_config(
 fn get_build_info(lock: State<'_, BuildLock>) -> BuildInfo {
     BuildInfo {
         locked: lock.locked,
+        packet_lab: !lock.locked,
         debug: cfg!(debug_assertions),
         config_source: lock.locked.then(|| lock.source.clone()),
         export_name: export_name(),
@@ -1088,27 +1197,33 @@ fn send_packet(
     packet: PacketSpec,
     app: AppHandle,
     manager: State<'_, SerialManager>,
+    lock: State<'_, BuildLock>,
 ) -> Result<u64, String> {
-    let bytes = packet.decode()?;
-    if bytes.is_empty() {
-        return Err("packet is empty".into());
-    }
-    if bytes.len() > 8192 {
-        return Err("packet is larger than 8 KiB".into());
-    }
+    ensure_packet_lab(lock.inner())?;
 
-    let outcome = {
+    let outcome: Result<(usize, u64, u64, Status), (String, Option<Status>)> = {
         let mut inner = manager.lock();
-        match inner.write_immediate(&bytes) {
-            Ok(()) => Ok((inner.txs, inner.status())),
-            Err(err) => Err((err, inner.status())),
+        // `{seq}` counts raw packets, so this one is the next value. Only commit
+        // it after a successful write; a failed attempt reuses the number.
+        let seq = inner.packet_seq.wrapping_add(1);
+        match render_packet(&packet, &inner, seq, 1, 0) {
+            Err(err) => Err((err, None)),
+            Ok(bytes) => match inner.write_immediate(&bytes) {
+                Ok(()) => {
+                    inner.packet_seq = seq;
+                    Ok((bytes.len(), inner.txs, seq, inner.status()))
+                }
+                Err(err) => Err((err, Some(inner.status()))),
+            },
         }
     };
 
-    let (txs, status) = match outcome {
+    let (bytes, txs, seq, status) = match outcome {
         Ok(result) => result,
         Err((err, status)) => {
-            let _ = app.emit("serial://status", status);
+            if let Some(status) = status {
+                let _ = app.emit("serial://status", status);
+            }
             return Err(err);
         }
     };
@@ -1119,7 +1234,8 @@ fn send_packet(
             at: epoch_ms(),
             label: packet.label_or(0),
             index: 0,
-            bytes: bytes.len(),
+            seq,
+            bytes,
             sent: 1,
             txs,
             interval_ms: 0,
@@ -1127,7 +1243,7 @@ fn send_packet(
     );
     let _ = app.emit("serial://status", status);
 
-    Ok(bytes.len() as u64)
+    Ok(bytes as u64)
 }
 
 #[tauri::command]
@@ -1137,7 +1253,10 @@ fn start_packet_sender(
     limit: u64,
     app: AppHandle,
     manager: State<'_, SerialManager>,
+    lock: State<'_, BuildLock>,
 ) -> Result<SenderState, String> {
+    ensure_packet_lab(lock.inner())?;
+
     if packets.is_empty() {
         return Err("add at least one packet".into());
     }
@@ -1148,27 +1267,31 @@ fn start_packet_sender(
         return Err("limit is too large".into());
     }
 
-    let mut frames = Vec::with_capacity(packets.len());
-    for (index, packet) in packets.iter().enumerate() {
-        let bytes = packet
-            .decode()
-            .map_err(|err| format!("{}: {err}", packet.label_or(index)))?;
-        if bytes.is_empty() {
-            return Err(format!("{}: payload is empty", packet.label_or(index)));
-        }
-        if bytes.len() > 8192 {
-            return Err(format!(
-                "{}: payload is larger than 8 KiB",
-                packet.label_or(index)
-            ));
-        }
-        frames.push((packet.label_or(index), bytes));
-    }
-
     {
         let inner = manager.lock();
         if inner.port.is_none() {
             return Err("connect to a serial port first".into());
+        }
+
+        // Catch template typos before the schedule starts. Payload decoding is
+        // deferred to send time because a placeholder may be missing until the
+        // first telemetry sample arrives.
+        for (index, packet) in packets.iter().enumerate() {
+            let label = packet.label_or(index);
+            let vars = template::TemplateVars {
+                seq: inner.packet_seq,
+                sent: 0,
+                index,
+                label: &label,
+                now_ms: epoch_ms(),
+                state: &inner.state,
+                telemetry: &inner.telemetry,
+            };
+            let expanded = template::expand(&packet.payload, &vars)
+                .map_err(|err| format!("{label}: {err}"))?;
+            if expanded.is_empty() {
+                return Err(format!("{label}: payload is empty"));
+            }
         }
     }
 
@@ -1179,7 +1302,11 @@ fn start_packet_sender(
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    let labels: Vec<String> = frames.iter().map(|(label, _)| label.clone()).collect();
+    let labels: Vec<String> = packets
+        .iter()
+        .enumerate()
+        .map(|(index, packet)| packet.label_or(index))
+        .collect();
     let state = {
         let mut inner = manager.lock();
         let generation = inner.sender.generation.wrapping_add(1);
@@ -1187,7 +1314,7 @@ fn start_packet_sender(
             running: true,
             generation,
             interval_ms,
-            packet_count: frames.len(),
+            packet_count: packets.len(),
             labels,
             sent: 0,
             limit,
@@ -1203,7 +1330,7 @@ fn start_packet_sender(
         Arc::clone(&manager.shared),
         stop,
         interval_ms,
-        frames,
+        packets,
         limit,
     );
 
@@ -1215,7 +1342,10 @@ fn start_packet_sender(
 fn stop_packet_sender(
     app: AppHandle,
     manager: State<'_, SerialManager>,
+    lock: State<'_, BuildLock>,
 ) -> Result<SenderState, String> {
+    ensure_packet_lab(lock.inner())?;
+
     let state = {
         let mut inner = manager.lock();
         inner.stop_sender();
@@ -1226,7 +1356,11 @@ fn stop_packet_sender(
 }
 
 #[tauri::command]
-fn get_packet_sender(manager: State<'_, SerialManager>) -> Result<SenderState, String> {
+fn get_packet_sender(
+    manager: State<'_, SerialManager>,
+    lock: State<'_, BuildLock>,
+) -> Result<SenderState, String> {
+    ensure_packet_lab(lock.inner())?;
     Ok(manager.lock().sender.clone())
 }
 
@@ -1237,16 +1371,82 @@ fn inject_rx(
     packet: PacketSpec,
     app: AppHandle,
     manager: State<'_, SerialManager>,
+    lock: State<'_, BuildLock>,
 ) -> Result<u64, String> {
-    let bytes = packet.decode()?;
-    if bytes.is_empty() {
-        return Err("packet is empty".into());
-    }
-    if bytes.len() > 8192 {
-        return Err("packet is larger than 8 KiB".into());
-    }
+    ensure_packet_lab(lock.inner())?;
+
+    let bytes = {
+        let inner = manager.lock();
+        // Injection does not write to the wire, so it neither advances `{seq}`
+        // nor counts as a sent packet.
+        render_packet(&packet, &inner, inner.packet_seq, 0, 0)?
+    };
+
     ingest_bytes(&app, &Arc::clone(&manager.shared), &bytes, true);
     Ok(bytes.len() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(encoding: PacketEncoding, payload: &str) -> PacketSpec {
+        PacketSpec {
+            label: "test".into(),
+            encoding,
+            payload: payload.into(),
+        }
+    }
+
+    #[test]
+    fn renders_text_templates_and_escapes() {
+        let mut inner = Inner::new();
+        inner.state.bias_enabled = true;
+        inner.state.bias_point = protocol::BiasPoint::QuadPlus;
+        inner.telemetry.temp = Some(24.5);
+
+        let packet = spec(
+            PacketEncoding::Text,
+            "STATE seq={seq} sent={sent} bias={bias} temp={temp:.1}\\n",
+        );
+        let bytes = render_packet(&packet, &inner, 7, 2, 3).unwrap();
+
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "STATE seq=7 sent=2 bias=1 temp=24.5\n"
+        );
+    }
+
+    #[test]
+    fn raw_keeps_escapes_but_expands_templates() {
+        let inner = Inner::new();
+        let packet = spec(PacketEncoding::Raw, "C:\\logs\\{index}\\r");
+        let bytes = render_packet(&packet, &inner, 1, 1, 4).unwrap();
+
+        assert_eq!(String::from_utf8(bytes).unwrap(), "C:\\logs\\4\\r");
+    }
+
+    #[test]
+    fn hex_is_decoded_after_expansion() {
+        let mut inner = Inner::new();
+        inner.telemetry.temp = Some(16.0);
+
+        let packet = spec(PacketEncoding::Hex, "A5 {temp:.0}");
+        let bytes = render_packet(&packet, &inner, 1, 1, 0).unwrap();
+
+        assert_eq!(bytes, vec![0xA5, 0x16]);
+    }
+
+    #[test]
+    fn rejects_empty_and_unknown_templates() {
+        let inner = Inner::new();
+
+        let empty = render_packet(&spec(PacketEncoding::Raw, ""), &inner, 1, 0, 0);
+        assert!(empty.unwrap_err().contains("payload is empty"));
+
+        let unknown = render_packet(&spec(PacketEncoding::Text, "{nope}"), &inner, 1, 0, 0);
+        assert!(unknown.unwrap_err().contains("unknown template variable"));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1275,6 +1475,8 @@ pub fn run() {
             disconnect,
             set_state,
             get_status,
+            get_wire_format,
+            set_wire_format,
             send_now,
             calibrate,
             write_text_file,

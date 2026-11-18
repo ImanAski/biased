@@ -1,5 +1,7 @@
 import { reactive, watch } from "vue";
 
+export type WireFormat = "text" | "binary";
+
 /**
  * Persisted app preferences.
  *
@@ -9,16 +11,23 @@ import { reactive, watch } from "vue";
 export interface AppSettings {
   /** Baud rate pre-filled in the connect panel. */
   defaultBaud: number;
+  /** Outbound wire format for master-generated query/command frames (editor builds). */
+  wireFormat: WireFormat;
 }
 
 const STORAGE_KEY = "bias-controller.settings";
 
 const DEFAULTS: AppSettings = {
   defaultBaud: 115200,
+  wireFormat: "text",
 };
 
 function defaults(): AppSettings {
   return { ...DEFAULTS };
+}
+
+function isWireFormat(value: unknown): value is WireFormat {
+  return value === "text" || value === "binary";
 }
 
 function load(): AppSettings {
@@ -29,9 +38,15 @@ function load(): AppSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return base;
 
-    const parsed = JSON.parse(raw) as { defaultBaud?: unknown };
+    const parsed = JSON.parse(raw) as {
+      defaultBaud?: unknown;
+      wireFormat?: unknown;
+    };
     if (typeof parsed.defaultBaud === "number") {
       base.defaultBaud = parsed.defaultBaud;
+    }
+    if (isWireFormat(parsed.wireFormat)) {
+      base.wireFormat = parsed.wireFormat;
     }
 
     return base;

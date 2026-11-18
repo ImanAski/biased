@@ -61,10 +61,10 @@ import { configErrors, locked, widgetConfig } from "../lib/widgets";
     <code>widgets.toml</code>.
   </div>
 
-  <!-- Control state currently being sent to the MCU every tick. -->
+  <!-- Pending command state, sent on demand and polled every tick. -->
   <div class="mb-4 flex items-center gap-3 text-xs text-faint">
     <span class="rounded bg-faint/20 px-2 py-1 text-muted">
-      TX every {{ status.tickMs }} ms
+      Query every {{ status.tickMs }} ms
     </span>
     <span>
       bias {{ state.biasEnabled ? "on" : "off" }} ·

@@ -352,12 +352,24 @@ function resetDefaults() {
           control panel.
         </span>
       </label>
+
+      <label v-if="!locked" class="block max-w-xs space-y-1">
+        <span class="text-sm text-muted">Wire format</span>
+        <select v-model="settings.wireFormat" :class="fieldClass">
+          <option value="text">Text (ASCII)</option>
+          <option value="binary">Binary (placeholder)</option>
+        </select>
+        <span class="block text-xs text-faint">
+          Outbound format for periodic query and on-demand command frames.
+          Available only in editor builds.
+        </span>
+      </label>
     </section>
 
     <section class="space-y-2 rounded-2xl border border-line bg-panel p-5">
       <span class="text-xs font-bold uppercase text-muted">Master clock</span>
       <div class="flex justify-between text-sm">
-        <span class="text-muted">State frame period</span>
+        <span class="text-muted">Query period</span>
         <span class="text-ink">{{ status.tickMs }} ms</span>
       </div>
       <div class="flex justify-between text-sm">

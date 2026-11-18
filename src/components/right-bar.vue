@@ -143,7 +143,7 @@ const fieldClass =
         :disabled="!status.connected"
         @click="sendNow"
       >
-        Send state now
+        Send command
       </button>
 
       <button

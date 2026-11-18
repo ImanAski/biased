@@ -30,7 +30,7 @@
 #                Values outside low/high are highlighted as LOW / HIGH.
 #                Both keys are optional.
 #
-#  Controls (writable, mirrored to the MCU every tick):
+#  Controls (writable command snapshot, sent on demand via "Send command"):
 #    id          unique name for this widget
 #    label       widget title (defaults to id)
 #    kind        toggle | select | range | stepper | knob | segmented

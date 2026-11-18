@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { status } from "../lib/device";
 import {
-  addComposerPacket,
+  analyzePacket,
   capturePaused,
   capturedBytes,
   clearRx,
@@ -11,22 +11,24 @@ import {
   formatAge,
   formatBytes,
   formatClock,
+  hasTemplate,
   hexDump,
   injectPacket,
   MAX_RX,
-  moveComposerPacket,
   packetError,
-  removeComposerPacket,
+  packetLabel,
+  packetProblem,
+  packetScript,
   rxLastAt,
   rxPackets,
   rxRate,
   rxTotals,
+  scriptErrors,
   sendIntervalMs,
   sendLimit,
   sendOnce,
   sender,
   senderBusy,
-  setPacketEncoding,
   startSending,
   stopSending,
   toAscii,
@@ -74,6 +76,10 @@ const detailRows = computed(() =>
   selected.value ? hexDump(selected.value.bytes) : [],
 );
 
+const detailAnalysis = computed(() =>
+  selected.value ? analyzePacket(selected.value.bytes) : null,
+);
+
 const lastAge = computed(() =>
   rxLastAt.value === null ? null : Math.max(0, now.value - rxLastAt.value),
 );
@@ -84,6 +90,19 @@ const hasLimit = computed({
     sendLimit.value = on ? Math.max(1, sendLimit.value || 100) : 0;
   },
 });
+
+const parsedBytes = computed(() =>
+  composerPackets.value.reduce(
+    (total, packet, index) =>
+      total + decodePayload(packet, index).bytes.length,
+    0,
+  ),
+);
+
+const templatedCount = computed(
+  () =>
+    composerPackets.value.filter((packet) => hasTemplate(packet.payload)).length,
+);
 
 const countdown = computed(() => {
   if (!sender.running || sender.nextAt === null) {
@@ -157,8 +176,13 @@ function clearInbound() {
   selectedId.value = null;
 }
 
-function payloadInfo(packet: ComposerPacket) {
-  return decodePayload(packet);
+function payloadInfo(packet: ComposerPacket, index = 0) {
+  return decodePayload(packet, index);
+}
+
+function payloadSize(packet: ComposerPacket, index = 0): string {
+  const info = payloadInfo(packet, index);
+  return info.error ? "—" : `${info.bytes.length} B`;
 }
 
 function intervalInput(event: Event) {
@@ -391,8 +415,8 @@ function preview(packet: RxPacket): string {
               }}
             </span>
             <span class="max-w-xs text-xs text-faint">
-              Connect a port, or use “Inject” in the composer to feed synthetic
-              RX data without hardware.
+              Connect a port, or use “Inject” in the packet script to feed
+              synthetic RX data without hardware.
             </span>
           </div>
         </div>
@@ -445,6 +469,64 @@ function preview(packet: RxPacket): string {
                 empty payload
               </div>
             </div>
+
+            <div
+              v-if="detailAnalysis"
+              class="mt-2 grid gap-2 text-[11px] sm:grid-cols-2"
+            >
+              <div class="rounded-lg border border-line bg-panel p-2">
+                <div class="mb-1 flex items-center justify-between">
+                  <span class="font-semibold text-muted">Structure</span>
+                  <span
+                    class="rounded bg-faint/20 px-1.5 py-0.5 font-mono text-[9px] uppercase text-dim"
+                  >
+                    {{ detailAnalysis.kind }}
+                  </span>
+                </div>
+                <div
+                  class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 font-mono text-[10px] text-dim"
+                >
+                  <span>framing</span>
+                  <span class="text-ink">{{ detailAnalysis.framing }}</span>
+                  <span>printable</span>
+                  <span class="text-ink">
+                    {{ Math.round(detailAnalysis.printable * 100) }}%
+                  </span>
+                  <span>lines</span>
+                  <span class="text-ink">{{ detailAnalysis.lines }}</span>
+                  <span>command</span>
+                  <span class="truncate text-ink">
+                    {{ detailAnalysis.command ?? "—" }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="rounded-lg border border-line bg-panel p-2">
+                <div class="mb-1 flex items-center justify-between">
+                  <span class="font-semibold text-muted">Fields</span>
+                  <span class="font-mono text-[9px] text-faint">
+                    {{ detailAnalysis.fields.length }}
+                  </span>
+                </div>
+                <div
+                  v-if="detailAnalysis.fields.length"
+                  class="flex flex-wrap gap-1"
+                >
+                  <span
+                    v-for="(field, fieldIndex) in detailAnalysis.fields"
+                    :key="`${field.key}-${fieldIndex}`"
+                    class="rounded bg-faint/15 px-1.5 py-0.5 font-mono text-[10px] text-ink"
+                  >
+                    <span class="text-muted">{{ field.key }}</span>=<span>{{
+                      field.value
+                    }}</span>
+                  </span>
+                </div>
+                <p v-else class="text-[10px] text-faint">
+                  No whitespace-separated <code>key=value</code> fields.
+                </p>
+              </div>
+            </div>
           </template>
 
           <div v-else class="text-xs text-faint">
@@ -458,10 +540,10 @@ function preview(packet: RxPacket): string {
         <div class="flex items-center justify-between">
           <div class="flex flex-col">
             <span class="text-xs font-bold uppercase text-muted"
-              >Packet composer</span
+              >Packet script</span
             >
             <span class="text-[11px] text-faint">
-              One packet per interval, in list order.
+              One packet per line, in send order.
             </span>
           </div>
           <span
@@ -569,136 +651,154 @@ function preview(packet: RxPacket): string {
           </div>
         </div>
 
-        <!-- Packets -->
+        <!-- Script -->
         <div class="space-y-2">
-          <div class="flex items-center justify-between">
+          <div class="flex flex-wrap items-center justify-between gap-2">
             <span class="text-xs font-bold uppercase text-muted">Packets</span>
-            <button
-              class="rounded-md border border-line px-2 py-1 text-[10px] text-muted transition hover:text-ink"
-              @click="addComposerPacket"
+            <span
+              class="font-mono text-[10px]"
+              :class="scriptErrors.length ? 'text-danger' : 'text-faint'"
             >
-              + Add
-            </button>
+              {{ composerPackets.length }} packet{{
+                composerPackets.length === 1 ? "" : "s"
+              }}
+              · {{ formatBytes(parsedBytes) }}
+              <span v-if="templatedCount > 0">
+                · {{ templatedCount }} live
+              </span>
+            </span>
           </div>
 
-          <div class="max-h-[24rem] space-y-2 overflow-auto pr-1">
+          <textarea
+            v-model="packetScript"
+            rows="12"
+            spellcheck="false"
+            aria-label="Packet script"
+            class="w-full resize-y rounded-xl border border-line bg-field px-3 py-2 font-mono text-[11px] leading-5 text-ink outline-none transition focus:border-accent"
+          />
+
+          <div
+            v-if="scriptErrors.length > 0"
+            class="space-y-1 rounded-xl border border-danger/30 bg-danger/10 p-3"
+          >
+            <p class="text-xs font-semibold text-danger">
+              {{ scriptErrors.length }} script problem{{
+                scriptErrors.length === 1 ? "" : "s"
+              }}
+            </p>
+            <ul class="space-y-0.5 font-mono text-[11px] text-danger">
+              <li
+                v-for="(problem, index) in scriptErrors.slice(0, 6)"
+                :key="index"
+              >
+                line {{ problem.line }}: {{ problem.message }}
+              </li>
+            </ul>
+            <p v-if="scriptErrors.length > 6" class="text-[11px] text-danger">
+              …and {{ scriptErrors.length - 6 }} more.
+            </p>
+          </div>
+
+          <details
+            class="rounded-xl border border-line bg-field/50 px-3 py-2 text-[11px] text-muted"
+          >
+            <summary class="cursor-pointer select-none text-faint">
+              Script format
+            </summary>
+            <div class="mt-2 space-y-1 font-mono text-[10px] leading-5">
+              <p>
+                <span class="text-ink">Ping =&gt; PING\n</span>
+                <span class="text-faint">text (default)</span>
+              </p>
+              <p>
+                <span class="text-ink">Cal =&gt; [hex] 01 02 A0 FF</span>
+                <span class="text-faint">hex bytes</span>
+              </p>
+              <p>
+                <span class="text-ink">Note =&gt; [raw] C:\path\file</span>
+                <span class="text-faint">literal text</span>
+              </p>
+              <p>
+                <span class="text-ink">TLM seq=1 ...\n</span>
+                <span class="text-faint">unlabelled text</span>
+              </p>
+              <p>
+                <span class="text-ink"
+                  >Live =&gt; seq={seq} temp={temp:.2|0.0}\n</span
+                >
+                <span class="text-faint">template</span>
+              </p>
+            </div>
+            <p class="mt-2 leading-relaxed text-faint">
+              <code>#</code> and <code>//</code> start a comment. Text supports
+              <code>\n</code>, <code>\r</code>, <code>\t</code>,
+              <code>\0</code>, <code>\\</code> and <code>\xNN</code>. A line
+              containing <code>=&gt;</code> uses the part before it as the
+              label. Invalid lines are reported above and are never sent.
+            </p>
+            <p class="mt-1 leading-relaxed text-faint">
+              <code>{name}</code> placeholders expand at send time from the
+              live device state and newest telemetry sample. Use
+              <code>{name:.2}</code> for a float, <code>{name:04}</code> for a
+              padded integer and <code>{name|fallback}</code> when a value may
+              be missing. Write <code>&#123;&#123;</code> and
+              <code>&#125;&#125;</code> for literal braces.
+            </p>
+          </details>
+
+          <div class="max-h-[16rem] space-y-1 overflow-auto pr-1">
             <div
               v-for="(packet, index) in composerPackets"
               :key="packet.id"
-              class="space-y-2 rounded-xl border border-line bg-field p-2.5"
+              class="flex items-center gap-2 rounded-lg border border-line bg-field px-2 py-1.5"
             >
-              <div class="flex items-center gap-1.5">
-                <span class="w-5 shrink-0 text-center font-mono text-[10px] text-dim">
-                  {{ index + 1 }}
-                </span>
-                <input
-                  v-model="packet.label"
-                  type="text"
-                  placeholder="Label"
-                  class="min-w-0 flex-1 rounded-md border border-line bg-panel px-2 py-1 text-xs text-ink outline-none focus:border-accent"
-                />
-
-                <div class="inline-flex shrink-0 overflow-hidden rounded-md border border-line text-[9px]">
-                  <button
-                    class="px-1.5 py-1 transition"
-                    :class="
-                      packet.encoding === 'text'
-                        ? 'bg-accent/15 text-accent'
-                        : 'text-muted hover:text-ink'
-                    "
-                    @click="setPacketEncoding(packet, 'text')"
-                  >
-                    TXT
-                  </button>
-                  <button
-                    class="px-1.5 py-1 transition"
-                    :class="
-                      packet.encoding === 'hex'
-                        ? 'bg-accent/15 text-accent'
-                        : 'text-muted hover:text-ink'
-                    "
-                    @click="setPacketEncoding(packet, 'hex')"
-                  >
-                    HEX
-                  </button>
-                </div>
-
-                <button
-                  class="rounded px-1 text-[11px] text-muted transition hover:text-ink disabled:opacity-30"
-                  :disabled="index === 0"
-                  title="Move up"
-                  @click="moveComposerPacket(packet.id, -1)"
-                >
-                  ↑
-                </button>
-                <button
-                  class="rounded px-1 text-[11px] text-muted transition hover:text-ink disabled:opacity-30"
-                  :disabled="index === composerPackets.length - 1"
-                  title="Move down"
-                  @click="moveComposerPacket(packet.id, 1)"
-                >
-                  ↓
-                </button>
-                <button
-                  class="rounded px-1 text-[11px] text-muted transition hover:text-danger"
-                  title="Remove"
-                  @click="removeComposerPacket(packet.id)"
-                >
-                  ×
-                </button>
-              </div>
-
-              <textarea
-                v-model="packet.payload"
-                rows="2"
-                spellcheck="false"
-                :placeholder="
-                  packet.encoding === 'hex'
-                    ? '01 02 A0 FF'
-                    : 'PING\\n  (escapes: \\n \\r \\t \\\\ \\xNN)'
-                "
-                class="w-full resize-y rounded-md border border-line bg-panel px-2 py-1.5 font-mono text-[11px] leading-5 text-ink outline-none focus:border-accent"
-              />
-
-              <div class="flex flex-wrap items-center justify-between gap-2">
-                <span
-                  class="font-mono text-[10px]"
-                  :class="
-                    payloadInfo(packet).error ? 'text-danger' : 'text-faint'
-                  "
-                >
-                  {{
-                    payloadInfo(packet).error ??
-                    `${payloadInfo(packet).bytes.length} bytes`
-                  }}
-                </span>
-
-                <div class="flex items-center gap-1.5">
-                  <button
-                    class="rounded-md border border-line px-2 py-1 text-[10px] text-muted transition hover:text-ink disabled:opacity-40"
-                    :disabled="!status.connected || !!payloadInfo(packet).error"
-                    title="Write this packet now"
-                    @click="sendOnce(packet)"
-                  >
-                    Send
-                  </button>
-                  <button
-                    class="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-[10px] text-accent transition hover:bg-accent/20 disabled:opacity-40"
-                    :disabled="!!payloadInfo(packet).error"
-                    title="Inject as inbound data (no hardware needed)"
-                    @click="injectPacket(packet)"
-                  >
-                    Inject
-                  </button>
-                </div>
-              </div>
+              <span class="w-5 shrink-0 text-center font-mono text-[10px] text-dim">
+                {{ index + 1 }}
+              </span>
+              <span class="min-w-0 flex-1 truncate text-xs text-ink">{{
+                packetLabel(packet, index)
+              }}</span>
+              <span
+                class="shrink-0 rounded bg-faint/20 px-1.5 py-0.5 font-mono text-[9px] uppercase text-muted"
+              >
+                {{ packet.encoding }}
+              </span>
+              <span
+                v-if="hasTemplate(packet.payload)"
+                class="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 font-mono text-[9px] uppercase text-accent"
+                title="Placeholders expand at send time"
+              >
+                tpl
+              </span>
+              <span
+                class="shrink-0 font-mono text-[10px] text-faint"
+                :title="payloadInfo(packet, index).error ?? undefined"
+              >
+                {{ payloadSize(packet, index) }}
+              </span>
+              <button
+                class="shrink-0 rounded-md border border-line px-2 py-1 text-[10px] text-muted transition hover:text-ink disabled:opacity-40"
+                :disabled="!status.connected || !!packetProblem(packet)"
+                title="Write this packet now"
+                @click="sendOnce(packet)"
+              >
+                Send
+              </button>
+              <button
+                class="shrink-0 rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-[10px] text-accent transition hover:bg-accent/20 disabled:opacity-40"
+                :disabled="!!packetProblem(packet)"
+                title="Inject as inbound data (no hardware needed)"
+                @click="injectPacket(packet)"
+              >
+                Inject
+              </button>
             </div>
 
             <div
               v-if="composerPackets.length === 0"
               class="rounded-xl border border-dashed border-line px-3 py-6 text-center text-xs text-faint"
             >
-              No packets yet. Add one to start.
+              No packets in the script yet.
             </div>
           </div>
         </div>
@@ -730,7 +830,10 @@ function preview(packet: RxPacket): string {
               ? 'bg-danger/80 hover:bg-danger'
               : 'bg-teal-600 hover:bg-teal-500'
           "
-          :disabled="senderBusy || (!status.connected && !sender.running)"
+          :disabled="
+            senderBusy ||
+            (!sender.running && (!status.connected || scriptErrors.length > 0))
+          "
           @click="sender.running ? stopSending() : startSending()"
         >
           {{
@@ -747,14 +850,18 @@ function preview(packet: RxPacket): string {
           {{ sender.lastError }}
         </p>
         <p v-if="sender.running" class="text-[10px] text-warning/80">
-          The running schedule uses the packets captured at start. Stop and
-          start again to apply edits.
+          The running schedule re-expands templates at send time. Stop and
+          start again to change the packet definitions.
         </p>
         <p class="text-[10px] leading-relaxed text-faint">
-          Text payloads support <code>\n</code>, <code>\r</code>,
-          <code>\t</code>, <code>\\</code> and <code>\xNN</code>. Hex accepts
-          spaces, commas and <code>0x</code> prefixes. “Inject” simulates an
-          inbound chunk and feeds the monitor widgets.
+          The script is parsed live; invalid lines are reported above and are
+          never sent. Text payloads support <code>\n</code>, <code>\r</code>,
+          <code>\t</code>, <code>\0</code>, <code>\\</code> and
+          <code>\xNN</code>. Hex accepts spaces, commas and <code>0x</code>
+          prefixes. Raw sends the line as UTF-8 without escape processing.
+          Placeholders such as <code>{seq}</code> and <code>{temp:.2}</code> are
+          filled from live state and telemetry on every send. “Inject”
+          simulates an inbound chunk and feeds the monitor widgets.
         </p>
       </section>
     </div>

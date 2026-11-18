@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { BiasPoint } from "./metrics";
 import { addLog } from "./logs";
+import { settings, type WireFormat } from "./settings";
 
 /** One state snapshot, mirrored 1:1 with `DeviceState` in `src-tauri/src/protocol.rs`. */
 export interface DeviceState {
@@ -196,6 +197,12 @@ export async function initDevice() {
 
   addLog("info", "Application ready");
   watch(state, schedulePush, { deep: true });
+  watch(
+    () => settings.wireFormat,
+    (format) => {
+      void syncWireFormat(format);
+    },
+  );
 
   if (!inTauri) return;
 
@@ -230,7 +237,7 @@ export async function initDevice() {
     applyTelemetry(event.payload);
   });
 
-  await Promise.all([refreshStatus(), refreshPorts()]);
+  await Promise.all([refreshStatus(), refreshPorts(), syncWireFormat()]);
 }
 
 export async function refreshStatus() {
@@ -273,19 +280,19 @@ export async function disconnect() {
   }
 }
 
-/** Write the current snapshot immediately, bypassing the 300 ms tick. */
+/** Send the current command snapshot immediately, outside the periodic query tick. */
 export async function sendNow() {
   if (!inTauri) return;
   try {
     Object.assign(status, await invoke<SerialStatus>("send_now"));
-    addLog("info", "State sent immediately");
+    addLog("info", "Command sent");
   } catch (err) {
     uiError.value = String(err);
-    addLog("error", `Immediate send failed: ${uiError.value}`);
+    addLog("error", `Command send failed: ${uiError.value}`);
   }
 }
 
-/** Trigger the MCU calibration routine (one-shot frame). */
+/** Trigger the MCU calibration routine (one-shot command frame). */
 export async function calibrate() {
   if (!inTauri) return;
   try {
@@ -294,5 +301,18 @@ export async function calibrate() {
   } catch (err) {
     uiError.value = String(err);
     addLog("error", `Calibration failed: ${uiError.value}`);
+  }
+}
+
+export async function syncWireFormat(format: WireFormat = settings.wireFormat) {
+  if (!inTauri) return;
+  try {
+    await invoke("set_wire_format", { format });
+  } catch (err) {
+    const message = String(err);
+    if (!message.includes("customer build")) {
+      uiError.value = message;
+      addLog("error", `Wire format failed: ${message}`);
+    }
   }
 }

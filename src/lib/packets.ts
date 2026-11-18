@@ -1,14 +1,33 @@
 import { computed, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { inTauri, status } from "./device";
+import {
+  inTauri,
+  state as deviceState,
+  status,
+  telemetry as deviceTelemetry,
+} from "./device";
 import { addLog } from "./logs";
+import {
+  expandTemplate,
+  parseTemplate,
+  validateTemplate,
+  type TemplateContext,
+} from "./template";
 
 /* -------------------------------------------------------------------------- */
 /* Types (mirrors the backend payloads)                                       */
 /* -------------------------------------------------------------------------- */
 
-export type PacketEncoding = "text" | "hex";
+/**
+ * How a packet payload is interpreted.
+ *
+ * - `text` — UTF-8 text with `\n`, `\r`, `\t`, `\0`, `\\` and `\xNN` escapes.
+ * - `hex`  — hexadecimal bytes; whitespace, commas, `_`, `:`, `-` and `0x`
+ *            prefixes are ignored.
+ * - `raw`  — UTF-8 text sent verbatim, with no escape processing.
+ */
+export type PacketEncoding = "text" | "hex" | "raw";
 
 export interface RxEvent {
   at: number;
@@ -41,6 +60,8 @@ export interface PacketSentEvent {
   at: number;
   label: string;
   index: number;
+  /** Packet Lab write counter for this packet, exposed to templates as `{seq}`. */
+  seq: number;
   bytes: number;
   sent: number;
   txs: number;
@@ -52,11 +73,23 @@ export interface TxMark extends PacketSentEvent {
   manual: boolean;
 }
 
+/** One parsed packet. The script text is the source of truth. */
 export interface ComposerPacket {
   id: number;
   label: string;
   encoding: PacketEncoding;
   payload: string;
+}
+
+export interface PacketScriptError {
+  /** 1-based line number in the script. */
+  line: number;
+  message: string;
+}
+
+export interface ParsedPacketScript {
+  packets: ComposerPacket[];
+  errors: PacketScriptError[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -93,6 +126,144 @@ export const capturedBytes = computed(() =>
 );
 
 /* -------------------------------------------------------------------------- */
+/* Packet script                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The packet lab keeps its packets as a small line-oriented script.
+ *
+ * ```
+ * # Comments start with # or //.
+ * Ping => PING\n
+ * TLM sample => TLM seq=1 temp=24.5\n
+ * Cal => [hex] 01 02 A0 FF
+ * Note => [raw] C:\logs\raw.txt
+ * ```
+ *
+ * - One packet per non-empty line, sent in script order.
+ * - `label =>` is optional; everything after `=>` is the payload.
+ * - `[text]`, `[hex]` and `[raw]` (or `text:`, `hex:`, `raw:`) select the
+ *   encoding. Text is the default.
+ * - Text payloads support `\n`, `\r`, `\t`, `\0`, `\\` and `\xNN`.
+ */
+const DEFAULT_SCRIPT = [
+  "# One packet per line, sent in order.",
+  '# Optional label before "=>"; encoding with [text], [hex] or [raw].',
+  "# {placeholders} expand at send time: {seq}, {temp:.2}, {biasPoint}.",
+  "Ping => PING\\n",
+  "TLM sample => TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\\n",
+  "Live status => STATE seq={seq} bias={biasEnabled} bp={biasPoint} temp={temp:.2|0.0} pout={outputPower:.3|0.000}\\n",
+].join("\n");
+
+const ENCODING_PATTERN = /^\[(text|hex|raw)\]\s*/i;
+const NAMED_ENCODING_PATTERN = /^(text|hex|raw)\s*:\s*/i;
+
+/** True when a payload contains a `{placeholder}` expanded by the backend. */
+export function hasTemplate(payload: string): boolean {
+  return parseTemplate(payload).placeholders.length > 0;
+}
+
+/**
+ * Static payload validation, without live telemetry values.
+ *
+ * Template names and formats are checked immediately. Final decoding and size
+ * limits are deferred for templated payloads because the substituted values can
+ * change the byte sequence; the backend performs the authoritative check at
+ * send time.
+ */
+function staticPayloadProblem(packet: ComposerPacket): string | null {
+  const templateProblem = validateTemplate(packet.payload);
+  if (templateProblem) return templateProblem;
+  if (hasTemplate(packet.payload)) return null;
+
+  const { bytes, error } = decodePayload(packet);
+  if (error) return error;
+  if (bytes.length === 0) return "payload is empty";
+  if (bytes.length > 8192) return "payload is larger than 8 KiB";
+  return null;
+}
+
+function normalizeEncoding(value: string): PacketEncoding {
+  const token = value.toLowerCase();
+  if (token === "hex") return "hex";
+  if (token === "raw") return "raw";
+  return "text";
+}
+
+/**
+ * Parse a packet script. Invalid lines are reported with their line number and
+ * skipped; valid lines are returned in order.
+ */
+export function parsePacketScript(script: string): ParsedPacketScript {
+  const packets: ComposerPacket[] = [];
+  const errors: PacketScriptError[] = [];
+  const lines = script.split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineNumber = index + 1;
+    let body = lines[index].trim();
+
+    if (!body || body.startsWith("#") || body.startsWith("//")) continue;
+
+    let label = "";
+    const arrow = body.indexOf("=>");
+    if (arrow !== -1) {
+      label = body.slice(0, arrow).trim();
+      body = body.slice(arrow + 2).trim();
+    }
+
+    let encoding: PacketEncoding = "text";
+    const bracket = body.match(ENCODING_PATTERN);
+    const named = bracket ? null : body.match(NAMED_ENCODING_PATTERN);
+    if (bracket) {
+      encoding = normalizeEncoding(bracket[1]);
+      body = body.slice(bracket[0].length);
+    } else if (named) {
+      encoding = normalizeEncoding(named[1]);
+      body = body.slice(named[0].length);
+    }
+
+    if (!body) {
+      errors.push({ line: lineNumber, message: "payload is empty" });
+      continue;
+    }
+
+    const packet: ComposerPacket = {
+      id: packets.length + 1,
+      label,
+      encoding,
+      payload: body,
+    };
+
+    const problem = staticPayloadProblem(packet);
+    if (problem) {
+      errors.push({ line: lineNumber, message: problem });
+      continue;
+    }
+
+    packets.push(packet);
+  }
+
+  return { packets, errors };
+}
+
+/** Render packets back into the script format. Used for legacy migrations. */
+export function serializePacketScript(packets: ComposerPacket[]): string {
+  return packets
+    .map((packet) => {
+      const label = packet.label.trim();
+      const prefix =
+        packet.encoding === "hex"
+          ? "[hex] "
+          : packet.encoding === "raw"
+            ? "[raw] "
+            : "";
+      return `${label ? `${label} => ` : ""}${prefix}${packet.payload}`;
+    })
+    .join("\n");
+}
+
+/* -------------------------------------------------------------------------- */
 /* Composer persistence                                                      */
 /* -------------------------------------------------------------------------- */
 
@@ -108,43 +279,57 @@ const LEGACY_TEXT_PAYLOADS = new Set([
   "TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\\n",
 ]);
 
-let nextPacketId = 1;
 let nextRxId = 1;
 let nextTxId = 1;
 let lastRxAt: number | null = null;
+/** Backend `{seq}` counter, updated from every successful Packet Lab write. */
+const lastPacketSeq = ref(0);
 let initialized = false;
 
-function newPacket(
-  label: string,
-  payload: string,
-  encoding: PacketEncoding = "text",
-): ComposerPacket {
-  return { id: nextPacketId++, label, encoding, payload };
-}
-
-function defaultPackets(): ComposerPacket[] {
-  return [
-    newPacket("Ping", "PING\\n"),
-    newPacket(
-      "TLM sample (inject)",
-      "TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8\\n",
-    ),
-  ];
-}
-
 interface SavedLab {
+  script?: unknown;
   packets?: unknown;
   intervalMs?: unknown;
   limit?: unknown;
 }
 
+function legacyPackets(entries: unknown[]): ComposerPacket[] {
+  return entries
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        !!entry && typeof entry === "object",
+    )
+    .map((entry, index) => {
+      const payload = typeof entry.payload === "string" ? entry.payload : "";
+      const savedEncoding: PacketEncoding =
+        entry.encoding === "hex"
+          ? "hex"
+          : entry.encoding === "raw"
+            ? "raw"
+            : "text";
+      const encoding =
+        savedEncoding === "hex" &&
+        LEGACY_TEXT_PAYLOADS.has(payload) &&
+        decodeHex(payload).error !== null
+          ? "text"
+          : savedEncoding;
+
+      return {
+        id: index + 1,
+        label: typeof entry.label === "string" ? entry.label : "",
+        encoding,
+        payload,
+      };
+    });
+}
+
 function loadLab(): {
-  packets: ComposerPacket[];
+  script: string;
   intervalMs: number;
   limit: number;
 } {
   const fallback = {
-    packets: defaultPackets(),
+    script: DEFAULT_SCRIPT,
     intervalMs: 300,
     limit: 0,
   };
@@ -156,30 +341,17 @@ function loadLab(): {
     if (!raw) return fallback;
 
     const saved = JSON.parse(raw) as SavedLab;
-    const packets = Array.isArray(saved.packets)
-      ? saved.packets
-          .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
-          .map((entry) => {
-            const payload = typeof entry.payload === "string" ? entry.payload : "";
-            const savedEncoding: PacketEncoding =
-              entry.encoding === "hex" ? "hex" : "text";
-            const encoding =
-              savedEncoding === "hex" &&
-              LEGACY_TEXT_PAYLOADS.has(payload) &&
-              decodeHex(payload).error !== null
-                ? "text"
-                : savedEncoding;
+    let script = fallback.script;
 
-            return newPacket(
-              typeof entry.label === "string" ? entry.label : "",
-              payload,
-              encoding,
-            );
-          })
-      : [];
+    if (typeof saved.script === "string") {
+      script = saved.script;
+    } else if (Array.isArray(saved.packets)) {
+      const packets = legacyPackets(saved.packets);
+      if (packets.length > 0) script = serializePacketScript(packets);
+    }
 
     return {
-      packets: packets.length > 0 ? packets : fallback.packets,
+      script,
       intervalMs:
         typeof saved.intervalMs === "number"
           ? clampInterval(saved.intervalMs)
@@ -196,9 +368,21 @@ function loadLab(): {
 
 const savedLab = loadLab();
 
-export const composerPackets = reactive<ComposerPacket[]>(savedLab.packets);
+export const packetScript = ref(savedLab.script);
 export const sendIntervalMs = ref(savedLab.intervalMs);
 export const sendLimit = ref(savedLab.limit);
+
+const parsedScript = computed(() => parsePacketScript(packetScript.value));
+
+/** Valid packets from the script, in send order. */
+export const composerPackets = computed<ComposerPacket[]>(
+  () => parsedScript.value.packets,
+);
+
+/** Script problems, reported by line. */
+export const scriptErrors = computed<PacketScriptError[]>(
+  () => parsedScript.value.errors,
+);
 
 function saveLab() {
   if (typeof localStorage === "undefined") return;
@@ -206,11 +390,7 @@ function saveLab() {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        packets: composerPackets.map(({ label, encoding, payload }) => ({
-          label,
-          encoding,
-          payload,
-        })),
+        script: packetScript.value,
         intervalMs: sendIntervalMs.value,
         limit: sendLimit.value,
       }),
@@ -220,8 +400,13 @@ function saveLab() {
   }
 }
 
-watch(composerPackets, saveLab, { deep: true });
-watch([sendIntervalMs, sendLimit], saveLab);
+watch([packetScript, sendIntervalMs, sendLimit], saveLab);
+
+// Editing the script clears the previous start/send error so stale messages do
+// not hide a new problem.
+watch(packetScript, () => {
+  packetError.value = null;
+});
 
 /* -------------------------------------------------------------------------- */
 /* Initialisation                                                            */
@@ -267,7 +452,7 @@ export async function initPackets() {
   try {
     applySender(await invoke<SenderState>("get_packet_sender"));
   } catch {
-    // Older backend or preview: keep the local defaults.
+    // Older backend, preview, or a customer build: keep the local defaults.
   }
 }
 
@@ -296,6 +481,7 @@ function pushRx(payload: RxEvent) {
 
 function pushTxMark(payload: PacketSentEvent) {
   status.txs = payload.txs;
+  if (typeof payload.seq === "number") lastPacketSeq.value = payload.seq;
   txMarks.push({
     ...payload,
     id: nextTxId++,
@@ -331,14 +517,9 @@ function spec(packet: ComposerPacket) {
 }
 
 /** Validate a packet before it reaches the backend. */
-function payloadProblem(packet: ComposerPacket): string | null {
-  const { bytes, error } = decodePayload(packet);
-  if (error) return `${packetLabel(packet)}: ${error}`;
-  if (bytes.length === 0) return `${packetLabel(packet)}: payload is empty`;
-  if (bytes.length > 8192) {
-    return `${packetLabel(packet)}: payload is larger than 8 KiB`;
-  }
-  return null;
+export function packetProblem(packet: ComposerPacket): string | null {
+  const problem = staticPayloadProblem(packet);
+  return problem ? `${packetLabel(packet)}: ${problem}` : null;
 }
 
 export async function sendOnce(packet: ComposerPacket) {
@@ -348,7 +529,7 @@ export async function sendOnce(packet: ComposerPacket) {
     return;
   }
 
-  const problem = payloadProblem(packet);
+  const problem = packetProblem(packet);
   if (problem) {
     packetError.value = problem;
     return;
@@ -366,13 +547,20 @@ export async function sendOnce(packet: ComposerPacket) {
 export async function startSending() {
   packetError.value = null;
 
-  if (composerPackets.length === 0) {
-    packetError.value = "Add at least one packet first.";
+  if (scriptErrors.value.length > 0) {
+    packetError.value = `Fix ${scriptErrors.value.length} script problem${
+      scriptErrors.value.length === 1 ? "" : "s"
+    } first.`;
     return;
   }
 
-  for (const packet of composerPackets) {
-    const problem = payloadProblem(packet);
+  if (composerPackets.value.length === 0) {
+    packetError.value = "Add at least one packet to the script first.";
+    return;
+  }
+
+  for (const packet of composerPackets.value) {
+    const problem = packetProblem(packet);
     if (problem) {
       packetError.value = problem;
       return;
@@ -383,7 +571,7 @@ export async function startSending() {
   try {
     const state = await invoke<SenderState>("start_packet_sender", {
       intervalMs: clampInterval(sendIntervalMs.value),
-      packets: composerPackets.map(spec),
+      packets: composerPackets.value.map(spec),
       limit: Math.max(0, Math.floor(sendLimit.value)),
     });
     applySender(state);
@@ -419,7 +607,7 @@ export async function injectPacket(packet: ComposerPacket) {
     return;
   }
 
-  const problem = payloadProblem(packet);
+  const problem = packetProblem(packet);
   if (problem) {
     packetError.value = problem;
     return;
@@ -433,23 +621,6 @@ export async function injectPacket(packet: ComposerPacket) {
     packetError.value = String(err);
     addLog("error", `Injection failed: ${String(err)}`);
   }
-}
-
-export function addComposerPacket() {
-  composerPackets.push(newPacket("", "", "text"));
-}
-
-export function removeComposerPacket(id: number) {
-  const index = composerPackets.findIndex((packet) => packet.id === id);
-  if (index >= 0) composerPackets.splice(index, 1);
-}
-
-export function moveComposerPacket(id: number, direction: -1 | 1) {
-  const index = composerPackets.findIndex((packet) => packet.id === id);
-  const target = index + direction;
-  if (index < 0 || target < 0 || target >= composerPackets.length) return;
-  const [packet] = composerPackets.splice(index, 1);
-  composerPackets.splice(target, 0, packet);
 }
 
 export function clearRx() {
@@ -467,14 +638,52 @@ export function packetLabel(packet: ComposerPacket, index = 0): string {
   return label || `packet ${index + 1}`;
 }
 
-/** Decode a composed packet with the same rules as the Rust backend. */
-export function decodePayload(packet: ComposerPacket): {
+/** Build the same context the backend uses for the next send. */
+function liveTemplateContext(
+  packet: ComposerPacket,
+  index: number,
+): TemplateContext {
+  const nextSent = sender.running ? sender.sent + 1 : 1;
+  return {
+    // A one-shot or scheduled send uses the next counter value; the backend
+    // reports the committed value after every successful write.
+    seq: lastPacketSeq.value + 1,
+    sent: nextSent,
+    index,
+    label: packetLabel(packet, index),
+    now: Date.now(),
+    state: deviceState,
+    telemetry: deviceTelemetry,
+  };
+}
+
+/**
+ * Decode a composed packet with the same rules as the Rust backend.
+ *
+ * Templates are expanded with the live state and newest telemetry sample so
+ * the editor can show the bytes that would be written right now.
+ */
+export function decodePayload(
+  packet: ComposerPacket,
+  index = 0,
+): {
   bytes: number[];
   error: string | null;
 } {
-  return packet.encoding === "hex"
-    ? decodeHex(packet.payload)
-    : decodeText(packet.payload);
+  const expanded = expandTemplate(
+    packet.payload,
+    liveTemplateContext(packet, index),
+  );
+  if (expanded.error) return { bytes: [], error: expanded.error };
+
+  switch (packet.encoding) {
+    case "hex":
+      return decodeHex(expanded.text);
+    case "raw":
+      return decodeRaw(expanded.text);
+    default:
+      return decodeText(expanded.text);
+  }
 }
 
 function decodeText(payload: string): { bytes: number[]; error: string | null } {
@@ -531,6 +740,10 @@ function decodeText(payload: string): { bytes: number[]; error: string | null } 
   return { bytes, error: null };
 }
 
+function decodeRaw(payload: string): { bytes: number[]; error: string | null } {
+  return { bytes: Array.from(new TextEncoder().encode(payload)), error: null };
+}
+
 function decodeHex(payload: string): { bytes: number[]; error: string | null } {
   const digits: string[] = [];
 
@@ -563,47 +776,105 @@ function decodeHex(payload: string): { bytes: number[]; error: string | null } {
   return { bytes, error: null };
 }
 
-function formatHexBytes(bytes: number[]): string {
-  return bytes
-    .map((byte) => byte.toString(16).toUpperCase().padStart(2, "0"))
-    .join(" ");
+export type PacketKind = "empty" | "text" | "binary" | "mixed";
+export type PacketFraming = "LF" | "CRLF" | "CR" | "none";
+
+export interface PacketField {
+  key: string;
+  value: string;
 }
 
-function bytesToText(bytes: number[]): string {
-  let out = "";
-  for (const byte of bytes) {
-    if (byte === 0x0a) out += "\\n";
-    else if (byte === 0x0d) out += "\\r";
-    else if (byte === 0x09) out += "\\t";
-    else if (byte === 0x5c) out += "\\\\";
-    else if (byte >= 0x20 && byte <= 0x7e) out += String.fromCharCode(byte);
-    else out += `\\x${byte.toString(16).toUpperCase().padStart(2, "0")}`;
-  }
-  return out;
+export interface PacketAnalysis {
+  length: number;
+  /** Share of bytes that are printable ASCII or common whitespace, 0…1. */
+  printable: number;
+  kind: PacketKind;
+  framing: PacketFraming;
+  /** Complete lines when the chunk is text, otherwise 0. */
+  lines: number;
+  /** First whitespace-delimited token, usually a frame tag such as `TLM`. */
+  command: string | null;
+  /** Whitespace-delimited tokens from the decoded text (limited for the UI). */
+  tokens: string[];
+  /** `key=value` tokens, also limited for the UI. */
+  fields: PacketField[];
+  /** UTF-8 decode with replacement characters for binary chunks. */
+  text: string;
 }
 
 /**
- * Switch a packet between text and hex while keeping the transmitted bytes the
- * same. Toggling to hex rewrites the payload as spaced hex bytes and toggling
- * back rewrites it as text with escapes, so the payload is always valid for the
- * selected encoding.
+ * Describe the structure of one inbound chunk: framing, text/binary balance and
+ * any `key=value` fields. This is intentionally read-only and cheap because the
+ * Packet Lab recomputes it for the selected chunk.
  */
-export function setPacketEncoding(
-  packet: ComposerPacket,
-  encoding: PacketEncoding,
-) {
-  if (packet.encoding === encoding) return;
+export function analyzePacket(bytes: number[]): PacketAnalysis {
+  const length = bytes.length;
+  const framing: PacketFraming =
+    length >= 2 && bytes[length - 2] === 0x0d && bytes[length - 1] === 0x0a
+      ? "CRLF"
+      : length >= 1 && bytes[length - 1] === 0x0a
+        ? "LF"
+        : length >= 1 && bytes[length - 1] === 0x0d
+          ? "CR"
+          : "none";
 
-  if (encoding === "hex") {
-    const { bytes, error } = decodeText(packet.payload);
-    if (!error) packet.payload = formatHexBytes(bytes);
-    packet.encoding = "hex";
-    return;
+  let printableBytes = 0;
+  for (const byte of bytes) {
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0d) {
+      printableBytes += 1;
+    } else if (byte >= 0x20 && byte <= 0x7e) {
+      printableBytes += 1;
+    }
   }
 
-  const { bytes, error } = decodeHex(packet.payload);
-  if (!error) packet.payload = bytesToText(bytes);
-  packet.encoding = "text";
+  const printable = length === 0 ? 0 : printableBytes / length;
+  const kind: PacketKind =
+    length === 0
+      ? "empty"
+      : printable >= 0.85
+        ? "text"
+        : printable <= 0.3
+          ? "binary"
+          : "mixed";
+
+  const text = new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+  const tokens =
+    kind === "binary"
+      ? []
+      : text
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean)
+          .slice(0, 64);
+  const fields = tokens
+    .map((token) => {
+      const separator = token.indexOf("=");
+      return separator === -1
+        ? null
+        : { key: token.slice(0, separator), value: token.slice(separator + 1) };
+    })
+    .filter((field): field is PacketField => field !== null)
+    .slice(0, 24);
+
+  const completeLines = text === "" ? 0 : text.split("\n").length;
+  const lines =
+    kind === "binary" || completeLines === 0
+      ? 0
+      : text.endsWith("\n")
+        ? completeLines - 1
+        : completeLines;
+
+  return {
+    length,
+    printable,
+    kind,
+    framing,
+    lines,
+    command: tokens[0] ?? null,
+    tokens,
+    fields,
+    text,
+  };
 }
 
 export function toHex(bytes: number[], max = bytes.length): string {

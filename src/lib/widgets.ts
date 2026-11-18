@@ -97,6 +97,8 @@ export interface WidgetConfigEnvelope {
 
 export interface BuildInfo {
   locked: boolean;
+  /** Developer tools (Packet Lab) are available only in editable builds. */
+  packetLab: boolean;
   debug: boolean;
   configSource: string | null;
   exportName: string;
@@ -313,6 +315,10 @@ export const configLoading = ref(false);
 
 /** True when this executable carries an uneditable, embedded layout. */
 export const locked = ref(false);
+/** True when developer tools such as the Packet Lab are available. */
+export const packetLab = ref(!inTauri);
+/** True once `get_build_info` has resolved, so the UI can hide editor tools. */
+export const buildInfoReady = ref(false);
 export const debugBuild = ref(false);
 export const configSource = ref<string | null>(null);
 export const exportName = ref("tauri-biased-customer");
@@ -405,6 +411,8 @@ export async function initWidgets() {
     try {
       const info = await invoke<BuildInfo>("get_build_info");
       locked.value = info.locked;
+      // Older backends do not report the flag; a browser preview stays editable.
+      packetLab.value = info.packetLab ?? true;
       debugBuild.value = info.debug;
       configSource.value = info.configSource;
       exportName.value = info.exportName;
@@ -412,6 +420,7 @@ export async function initWidgets() {
       addLog("warn", `Build information unavailable: ${String(err)}`);
     }
   }
+  buildInfoReady.value = true;
 
   // A customer build always uses its embedded layout; any remembered path on
   // the machine is irrelevant.

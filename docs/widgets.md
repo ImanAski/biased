@@ -108,8 +108,8 @@ TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 ibias=0.4 vsupply=12
 | `phaseError`    | `phase`, `perr`      | °    | Residual phase error            |
 | `lockStatus`    | `lock`, `locked`     | 0/1  | Loop lock flag                  |
 
-Unknown telemetry keys are ignored. Use **Packet Lab → Inject** to feed a `TLM`
-line without hardware while designing a layout.
+Unknown telemetry keys are ignored. In an editor build, use **Packet Lab →
+Inject** to feed a `TLM` line without hardware while designing a layout.
 
 ### Monitor variants
 
@@ -137,10 +137,11 @@ readout always shows the real value.
 
 ## Controls
 
-Controls edit the in-memory device snapshot. The serial loop sends a complete
-`STATE` frame every 300 ms, so a change takes effect on the next tick. Numeric
-values are clamped to the control range and snapped to `step`; `mode` is also
-rounded to an integer and clamped to 0–255.
+Controls edit the in-memory command snapshot. The app polls the MCU with a
+`QUERY` frame every 300 ms, but it does not stream control changes
+automatically. Click **Send command** to transmit the current snapshot as a
+`STATE` command frame. Numeric values are clamped to the control range and
+snapped to `step`; `mode` is also rounded to an integer and clamped to 0–255.
 
 ### Control fields
 
@@ -456,11 +457,13 @@ empty. A TOML syntax error is reported on its own. The most common rules:
 - **My edit does nothing** — the app uses the file in its config directory.
   Press **Reload** after editing, and check the Settings page shows the path
   you expect. Upgrades never replace an existing file.
-- **Monitor shows `—`** — no telemetry has arrived for that source. Inject a
-  `TLM` line in Packet Lab or connect the MCU.
+- **Monitor shows `—`** — no telemetry has arrived for that source. In an
+  editor build, inject a `TLM` line in Packet Lab or connect the MCU.
 - **Sparkline says “waiting for samples”** — samples arrive with telemetry;
   the chart fills as new values come in.
 - **Bar, gauge or meter has no fill** — add a `range`; the numeric value still
   displays without one.
-- **Control changes seem delayed** — by design: controls are mirrored in the
-  next `STATE` frame, sent every 300 ms.
+- **Control changes do not reach the MCU** — by design: controls update the
+  pending command snapshot, but the app only polls with `QUERY` frames in the
+  background. Click **Send command** to transmit the current snapshot as a
+  `STATE` command frame.
