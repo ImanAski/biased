@@ -30,20 +30,14 @@ use serde::{Deserialize, Serialize};
 use serialport::{SerialPort, SerialPortType};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-/// Master clock period. The app polls the MCU for telemetry this often.
-const TICK_MS: u64 = 300;
-
 /// Read/write timeout for the serial handle. Short enough that the reader
 /// thread notices a disconnect quickly, long enough for ordinary writes.
 const IO_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// Longest inbound line we buffer before dropping a partial frame.
-const MAX_LINE: usize = 8192;
+/// Longest inbound buffer/line we keep before dropping data to resync.
+const MAX_RX_BUFFER: usize = 8192;
 
 /// Shared, mutable state guarded by a single mutex.
-///
-/// The 300 ms thread, the reader/sender threads and every command take this
-/// lock briefly; writes are short, so contention is negligible.
 struct Inner {
     port: Option<Box<dyn SerialPort>>,
     state: DeviceState,
@@ -54,13 +48,16 @@ struct Inner {
     port_name: Option<String>,
     baud: u32,
     last_error: Option<String>,
-    /// Newest telemetry sample, merged from sparse `TLM` lines. Packet
-    /// templates read this so scheduled packets stay in sync with the MCU.
+    /// Newest telemetry sample, merged from inbound frames/lines.
     telemetry: protocol::TelemetryPatch,
     /// Counter for raw Packet Lab writes, exposed to templates as `{seq}`.
     packet_seq: u64,
-    /// Outbound wire format for master-generated query/command frames.
+    /// Legacy outbound wire format for query/command frames (legacy driver).
     wire_format: protocol::WireFormat,
+    /// Active protocol configuration (from widget/config TOML; locked in customer builds).
+    protocol_cfg: config::ProtocolConfig,
+    /// One-shot calibration flag for RSProtocol packets.
+    calibration_request: bool,
     reader_stop: Option<Arc<AtomicBool>>,
     reader_handle: Option<JoinHandle<()>>,
     sender_stop: Option<Arc<AtomicBool>>,
@@ -82,6 +79,8 @@ impl Inner {
             telemetry: protocol::TelemetryPatch::default(),
             packet_seq: 0,
             wire_format: protocol::WireFormat::Text,
+            protocol_cfg: config::ProtocolConfig::default(),
+            calibration_request: false,
             reader_stop: None,
             reader_handle: None,
             sender_stop: None,
@@ -98,7 +97,7 @@ impl Inner {
             rxs: self.rxs,
             rx_bytes: self.rx_bytes,
             last_error: self.last_error.clone(),
-            tick_ms: TICK_MS,
+            tick_ms: self.protocol_cfg.tick_ms,
         }
     }
 
@@ -170,17 +169,12 @@ impl SerialManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Spawn the 300 ms master loop. It runs for the lifetime of the process.
+    /// Spawn the master clock loop. It runs for the lifetime of the process.
     fn spawn_tick(&self, app: AppHandle) {
         let shared = Arc::clone(&self.shared);
-        let tick = Duration::from_millis(TICK_MS);
 
         thread::spawn(move || {
-            // Absolute deadline scheduling keeps the average period at exactly
-            // TICK_MS even though each write takes a little time. If the thread
-            // ever falls behind (e.g. a stalled port), we resync instead of
-            // bursting out catch-up frames.
-            let mut next = Instant::now() + tick;
+            let mut next = Instant::now() + Duration::from_millis(300);
 
             loop {
                 let now = Instant::now();
@@ -189,18 +183,27 @@ impl SerialManager {
                 } else {
                     next = now;
                 }
-                next += tick;
 
                 let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+                let tick = Duration::from_millis(inner.protocol_cfg.tick_ms.max(10));
+                next += tick;
 
-                // Nothing connected: keep the clock running so timing is stable
-                // once the user connects.
-                if inner.port.is_none() {
+                if inner.port.is_none() || !inner.protocol_cfg.periodic_send {
                     continue;
                 }
 
                 inner.seq = inner.seq.wrapping_add(1);
-                let frame = protocol::encode_query(inner.seq, inner.wire_format);
+                let cal = inner.calibration_request;
+                let frame = protocol::encode_periodic(
+                    inner.seq,
+                    &inner.state,
+                    cal,
+                    &inner.protocol_cfg,
+                    inner.wire_format,
+                );
+                if inner.protocol_cfg.driver == config::ProtocolDriver::Rs && cal {
+                    inner.calibration_request = false;
+                }
 
                 let result = match inner.port.as_mut() {
                     Some(port) => port.write_all(&frame).and_then(|()| port.flush()),
@@ -220,9 +223,6 @@ impl SerialManager {
                         );
                     }
                     Err(err) => {
-                        // A failed write means the link is gone. Drop the port and
-                        // tell the UI; the loop keeps ticking but sends nothing
-                        // until the user reconnects.
                         inner.port = None;
                         if let Some(stop) = &inner.reader_stop {
                             stop.store(true, Ordering::SeqCst);
@@ -621,7 +621,7 @@ fn spawn_reader(
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 2048];
-        let mut line = Vec::<u8>::new();
+        let mut rxbuf = Vec::<u8>::new();
 
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -634,20 +634,58 @@ fn spawn_reader(
                     let chunk = &buf[..n];
                     emit_rx(&app, &shared, chunk, false);
 
-                    line.extend_from_slice(chunk);
-                    while let Some(position) = line.iter().position(|byte| *byte == b'\n') {
-                        let raw: Vec<u8> = line.drain(..=position).collect();
-                        parse_and_emit_telemetry(&app, &shared, &raw);
-                    }
-                    if line.len() > MAX_LINE {
-                        line.clear();
+                    let driver = {
+                        let inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+                        inner.protocol_cfg.driver
+                    };
+
+                    rxbuf.extend_from_slice(chunk);
+                    match driver {
+                        config::ProtocolDriver::Legacy => {
+                            while let Some(position) = rxbuf.iter().position(|byte| *byte == b'\n') {
+                                let raw: Vec<u8> = rxbuf.drain(..=position).collect();
+                                parse_and_emit_telemetry(&app, &shared, &raw);
+                            }
+                            if rxbuf.len() > MAX_RX_BUFFER {
+                                rxbuf.clear();
+                            }
+                        }
+                        config::ProtocolDriver::Rs => {
+                            loop {
+                                let cfg = {
+                                    let inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+                                    inner.protocol_cfg.clone()
+                                };
+                                match protocol::decode_rs_master(&rxbuf, &cfg) {
+                                    None => break,
+                                    Some((consumed, patch)) => {
+                                        if consumed == 0 {
+                                            break;
+                                        }
+                                        rxbuf.drain(..consumed.min(rxbuf.len()));
+                                        if !patch.is_empty() {
+                                            {
+                                                let mut inner =
+                                                    shared.lock().unwrap_or_else(|p| p.into_inner());
+                                                inner.telemetry.merge(&patch);
+                                            }
+                                            let _ = app.emit("telemetry://state", patch);
+                                        }
+                                    }
+                                }
+                                if rxbuf.is_empty() {
+                                    break;
+                                }
+                            }
+                            if rxbuf.len() > MAX_RX_BUFFER {
+                                rxbuf.clear();
+                            }
+                        }
                     }
                 }
                 Err(err) => match err.kind() {
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => continue,
                     _ => {
-                        // The device disappeared. Mark the link down and let the
-                        // write side notice on its next frame as well.
                         let status = {
                             let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
                             inner.port = None;
@@ -700,9 +738,46 @@ fn parse_and_emit_telemetry(app: &AppHandle, shared: &Arc<Mutex<Inner>>, raw: &[
 fn ingest_bytes(app: &AppHandle, shared: &Arc<Mutex<Inner>>, bytes: &[u8], synthetic: bool) {
     emit_rx(app, shared, bytes, synthetic);
 
-    for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
-        if !raw.is_empty() {
-            parse_and_emit_telemetry(app, shared, raw);
+    let driver = {
+        let inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+        inner.protocol_cfg.driver
+    };
+
+    match driver {
+        config::ProtocolDriver::Legacy => {
+            for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
+                if !raw.is_empty() {
+                    parse_and_emit_telemetry(app, shared, raw);
+                }
+            }
+        }
+        config::ProtocolDriver::Rs => {
+            let mut buf = bytes.to_vec();
+            loop {
+                let cfg = {
+                    let inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+                    inner.protocol_cfg.clone()
+                };
+                match protocol::decode_rs_master(&buf, &cfg) {
+                    None => break,
+                    Some((consumed, patch)) => {
+                        if consumed == 0 {
+                            break;
+                        }
+                        buf.drain(..consumed.min(buf.len()));
+                        if !patch.is_empty() {
+                            {
+                                let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+                                inner.telemetry.merge(&patch);
+                            }
+                            let _ = app.emit("telemetry://state", patch);
+                        }
+                    }
+                }
+                if buf.is_empty() {
+                    break;
+                }
+            }
         }
     }
 }
@@ -997,16 +1072,23 @@ fn set_wire_format(
     Ok(())
 }
 
-/// Send the current command snapshot immediately, outside the periodic query tick.
-///
-/// Useful for applying state changes on demand without waiting for the next poll.
-/// It does not reset or interfere with the periodic query loop.
+/// Send the current command snapshot immediately, outside the periodic tick.
 #[tauri::command]
 fn send_now(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status, String> {
     let mut inner = manager.lock();
 
     inner.seq = inner.seq.wrapping_add(1);
-    let frame = protocol::encode_state(inner.seq, &inner.state, inner.wire_format);
+    let cal = inner.calibration_request;
+    let frame = protocol::encode_command(
+        inner.seq,
+        &inner.state,
+        cal,
+        &inner.protocol_cfg,
+        inner.wire_format,
+    );
+    if inner.protocol_cfg.driver == config::ProtocolDriver::Rs && cal {
+        inner.calibration_request = false;
+    }
     if let Err(err) = inner.write_immediate(&frame) {
         let status = inner.status();
         let _ = app.emit("serial://status", status);
@@ -1023,20 +1105,35 @@ fn send_now(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status,
     Ok(status)
 }
 
-/// Ask the MCU to run its calibration routine by sending a one-shot command.
+/// Ask the MCU to run its calibration routine by sending a calibration command/request.
 #[tauri::command]
 fn calibrate(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status, String> {
     let mut inner = manager.lock();
 
     inner.seq = inner.seq.wrapping_add(1);
-    let frame = protocol::encode_calibrate(inner.seq, inner.wire_format);
+    inner.calibration_request = true;
+    let frame = protocol::encode_calibration(
+        inner.seq,
+        &inner.state,
+        &inner.protocol_cfg,
+        inner.wire_format,
+    );
+    if inner.protocol_cfg.driver == config::ProtocolDriver::Rs {
+        // RS packet carries calibrationRequest flag; clear after this send.
+        inner.calibration_request = false;
+    }
     if let Err(err) = inner.write_immediate(&frame) {
         let status = inner.status();
         let _ = app.emit("serial://status", status);
         return Err(err);
     }
 
+    let seq = inner.seq;
+    let txs = inner.txs;
     let status = inner.status();
+    drop(inner);
+
+    let _ = app.emit("serial://tx", TxEvent { seq, txs });
     let _ = app.emit("serial://status", status.clone());
     Ok(status)
 }
@@ -1077,17 +1174,21 @@ fn default_widget_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn load_widget_config(
     path: Option<String>,
     app: AppHandle,
+    manager: State<'_, SerialManager>,
     lock: State<'_, BuildLock>,
 ) -> Result<WidgetConfigEnvelope, String> {
     if lock.locked {
         let source = lock.source.clone();
         return Ok(match lock.config.as_deref() {
             Some(text) => match config::parse(text) {
-                Ok(config) => WidgetConfigEnvelope {
-                    path: source,
-                    config: Some(config),
-                    errors: Vec::new(),
-                },
+                Ok(config) => {
+                    manager.lock().protocol_cfg = config.protocol.clone();
+                    WidgetConfigEnvelope {
+                        path: source,
+                        config: Some(config),
+                        errors: Vec::new(),
+                    }
+                }
                 Err(errors) => WidgetConfigEnvelope {
                     path: source,
                     config: None,
@@ -1115,11 +1216,14 @@ fn load_widget_config(
         fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
 
     match config::parse(&source) {
-        Ok(config) => Ok(WidgetConfigEnvelope {
-            path: path.display().to_string(),
-            config: Some(config),
-            errors: Vec::new(),
-        }),
+        Ok(config) => {
+            manager.lock().protocol_cfg = config.protocol.clone();
+            Ok(WidgetConfigEnvelope {
+                path: path.display().to_string(),
+                config: Some(config),
+                errors: Vec::new(),
+            })
+        }
         Err(errors) => Ok(WidgetConfigEnvelope {
             path: path.display().to_string(),
             config: None,

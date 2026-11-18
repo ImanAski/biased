@@ -1,8 +1,10 @@
-//! TOML-driven widget layout.
+//! TOML-driven widget layout and protocol configuration.
 //!
-//! The file only describes *presentation* and *limits*; it never changes the
-//! wire protocol. Monitors map onto telemetry fields and controls map onto
-//! fields of [`crate::protocol::DeviceState`].
+//! The file describes presentation, limits, and (optionally) wire/protocol
+//! behavior. Monitors map onto telemetry fields and controls map onto fields of
+//! [`crate::protocol::DeviceState`]. Protocol settings are editable in editor
+//! builds and become fixed when embedded in a configuration-locked customer
+//! build.
 
 use std::collections::HashSet;
 
@@ -50,6 +52,30 @@ fn default_segments() -> u8 {
     20
 }
 
+fn default_tick_ms() -> u64 {
+    300
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_rx_sync() -> u8 {
+    0xFC
+}
+
+fn default_tx_header() -> u8 {
+    0xFC
+}
+
+fn default_tx_footer() -> u8 {
+    0x00
+}
+
+fn default_scale() -> f64 {
+    1.0
+}
+
 fn kind_label(kind: ControlKind) -> &'static str {
     match kind {
         ControlKind::Toggle => "toggle",
@@ -67,6 +93,77 @@ pub struct WidgetConfig {
     pub title: String,
     pub monitors: Vec<MonitorWidget>,
     pub controls: Vec<ControlWidget>,
+    pub protocol: ProtocolConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolDriver {
+    /// Legacy app protocol: periodic QUERY poll and on-demand STATE/CAL frames.
+    Legacy,
+    /// RSProtocol-style fixed binary packets (configurable framing/CRC/mapping).
+    #[default]
+    Rs,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Endianness {
+    #[default]
+    Little,
+    Big,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrcKind {
+    None,
+    #[default]
+    Crc16Modbus,
+    Crc16Ibm,
+    Crc16CcittFalse,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProtocolConfig {
+    pub driver: ProtocolDriver,
+    /// Master clock period for periodic outbound activity.
+    pub tick_ms: u64,
+    /// When true, the master clock periodically sends the outbound packet/frame.
+    pub periodic_send: bool,
+    /// RS: sync byte expected at start of received master/telemetry frames.
+    pub rx_sync: u8,
+    /// RS: header byte written in transmitted slave/command frames.
+    pub tx_header: u8,
+    /// RS: footer byte written in transmitted slave/command frames.
+    pub tx_footer: u8,
+    pub endianness: Endianness,
+    pub crc: CrcKind,
+    /// Scale applied when encoding dither amplitude to uint16 wire units.
+    pub dither_amp_scale: f64,
+    /// Scale applied when encoding dither frequency to uint16 wire units.
+    pub dither_freq_scale: f64,
+    /// Scale applied when encoding/decoding telemetry-scaled uint16 values.
+    pub telemetry_scale: f64,
+}
+
+impl Default for ProtocolConfig {
+    fn default() -> Self {
+        Self {
+            driver: ProtocolDriver::Rs,
+            tick_ms: default_tick_ms(),
+            periodic_send: true,
+            rx_sync: default_rx_sync(),
+            tx_header: default_tx_header(),
+            tx_footer: default_tx_footer(),
+            endianness: Endianness::Big,
+            crc: CrcKind::None,
+            dither_amp_scale: 1000.0,
+            dither_freq_scale: 1.0,
+            telemetry_scale: 100.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -144,14 +241,58 @@ pub struct Threshold {
 /* -------------------------------------------------------------------------- */
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 struct RawConfig {
-    #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
     monitors: Vec<RawMonitor>,
-    #[serde(default)]
     controls: Vec<RawControl>,
+    protocol: RawProtocolConfig,
+}
+
+impl Default for RawConfig {
+    fn default() -> Self {
+        Self {
+            title: None,
+            monitors: Vec::new(),
+            controls: Vec::new(),
+            protocol: RawProtocolConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+struct RawProtocolConfig {
+    driver: ProtocolDriver,
+    tick_ms: u64,
+    periodic_send: bool,
+    rx_sync: u8,
+    tx_header: u8,
+    tx_footer: u8,
+    endianness: Endianness,
+    crc: CrcKind,
+    dither_amp_scale: f64,
+    dither_freq_scale: f64,
+    telemetry_scale: f64,
+}
+
+impl Default for RawProtocolConfig {
+    fn default() -> Self {
+        let d = ProtocolConfig::default();
+        Self {
+            driver: d.driver,
+            tick_ms: d.tick_ms,
+            periodic_send: d.periodic_send,
+            rx_sync: d.rx_sync,
+            tx_header: d.tx_header,
+            tx_footer: d.tx_footer,
+            endianness: d.endianness,
+            crc: d.crc,
+            dither_amp_scale: d.dither_amp_scale,
+            dither_freq_scale: d.dither_freq_scale,
+            telemetry_scale: d.telemetry_scale,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -484,6 +625,24 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
         });
     }
 
+    // Protocol validation (kept permissive so editors can adjust for target devices).
+    let p = raw.protocol;
+    if !(10..=60_000).contains(&p.tick_ms) {
+        errors.push(format!(
+            "protocol.tickMs must be between 10 and 60000 (got {})",
+            p.tick_ms
+        ));
+    }
+    if !p.dither_amp_scale.is_finite() || p.dither_amp_scale == 0.0 {
+        errors.push("protocol.ditherAmpScale must be a finite non-zero number".into());
+    }
+    if !p.dither_freq_scale.is_finite() || p.dither_freq_scale == 0.0 {
+        errors.push("protocol.ditherFreqScale must be a finite non-zero number".into());
+    }
+    if !p.telemetry_scale.is_finite() || p.telemetry_scale == 0.0 {
+        errors.push("protocol.telemetryScale must be a finite non-zero number".into());
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -496,6 +655,19 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             .unwrap_or_else(|| "Bias controller".into()),
         monitors,
         controls,
+        protocol: ProtocolConfig {
+            driver: p.driver,
+            tick_ms: p.tick_ms,
+            periodic_send: p.periodic_send,
+            rx_sync: p.rx_sync,
+            tx_header: p.tx_header,
+            tx_footer: p.tx_footer,
+            endianness: p.endianness,
+            crc: p.crc,
+            dither_amp_scale: p.dither_amp_scale,
+            dither_freq_scale: p.dither_freq_scale,
+            telemetry_scale: p.telemetry_scale,
+        },
     })
 }
 

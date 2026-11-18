@@ -1,8 +1,9 @@
 # =============================================================================
-#  Bias Controller — widget layout
+#  Bias Controller — widget layout & protocol
 # =============================================================================
 #
-#  This file decides which monitor cards and control widgets appear in the app.
+#  This file decides which monitor cards and control widgets appear in the app,
+#  and (optionally) how bytes are framed on the wire.
 #  Edit it with any text editor, then press "Reload" in Settings (or restart the
 #  app). A broken file is reported in the UI and the last good layout is kept.
 #
@@ -11,9 +12,23 @@
 #    macOS   : ~/Library/Application Support/com.iman.tauri-biased/widgets.toml
 #    Linux   : ~/.config/com.iman.tauri-biased/widgets.toml
 #
-#  You can also open any other .toml file from Settings.
+#  Exporting a configuration-locked customer build embeds this file into the
+#  executable, so protocol/layout choices made here become fixed for that build.
 #
-#  Monitors (read-only, fed by inbound telemetry lines):
+#  [protocol] (wire behavior; editable in editor builds, locked in customer):
+#    driver          "rs" (RSProtocol-style binary packets) or "legacy"
+#    tickMs          master clock period in ms (10..60000)
+#    periodicSend    send outbound packet/frame on every tick when connected
+#    rxSync          expected sync/header byte for received master telemetry (e.g. 0xFC)
+#    txHeader        header byte for transmitted slave/command frames
+#    txFooter        footer byte for transmitted slave/command frames
+#    endianness      "little" or "big" for uint16 wire fields
+#    crc             "none" | "crc16_modbus" | "crc16_ibm" | "crc16_ccitt_false"
+#    ditherAmpScale  UI amplitude * scale -> uint16 wire value
+#    ditherFreqScale UI frequency * scale -> uint16 wire value
+#    telemetryScale  uint16 wire value / scale -> UI telemetry units (and gain/offset scaling)
+#
+#  Monitors (read-only, fed by inbound telemetry):
 #    id          unique name for this widget
 #    label       card title (defaults to id)
 #    source      telemetry field: theta0 | temp | biasVoltage | inputPower |
@@ -27,32 +42,26 @@
 #    description small caption under the value
 #    range       display range: { min = 0, max = 100 }
 #    threshold   alarm limits:             { low = 10, high = 80 }
-#                Values outside low/high are highlighted as LOW / HIGH.
-#                Both keys are optional.
 #
-#  Controls (writable command snapshot, sent on demand via "Send command"):
-#    id          unique name for this widget
-#    label       widget title (defaults to id)
-#    kind        toggle | select | range | stepper | knob | segmented
-#    target      device state field:
-#                  toggle    -> biasEnabled
-#                  segmented -> biasEnabled
-#                  select    -> biasPoint | mode
-#                  range     -> ditherAmp | ditherFreq | mode | gain | offset
-#                  stepper   -> ditherAmp | ditherFreq | mode | gain | offset
-#                  knob      -> ditherAmp | ditherFreq | mode | gain | offset
-#    unit        unit suffix (numeric controls)
-#    description small caption
-#    options     select only, list of choices, e.g. ["QUAD+", "QUAD-"]
-#    presets     quick-set buttons for range/stepper/knob, e.g. [1, 10, 100]
-#    range       range/stepper/knob only: { min = 0, max = 10, step = 0.01 }
-#
-#  Telemetry lines the MCU can send back (see the Packet Lab page):
-#    TLM seq=1 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 \
-#               ibias=0.4 vsupply=12.1 phase=1.5 lock=1\n
+#  Controls (writable command snapshot):
+#    id/label/kind/target/unit/description/options/presets/range as before.
+#    (kind: toggle | select | range | stepper | knob | segmented)
 # =============================================================================
 
 title = "MCU-04 · Bias stage"
+
+[protocol]
+driver = "rs"
+tickMs = 300
+periodicSend = true
+rxSync = 0xFC
+txHeader = 0xFC
+txFooter = 0x00
+endianness = "big"
+crc = "none"
+ditherAmpScale = 1000.0
+ditherFreqScale = 1.0
+telemetryScale = 100.0
 
 # --------------------------------- Monitors ----------------------------------
 

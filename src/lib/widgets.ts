@@ -83,10 +83,29 @@ export interface ControlWidget {
   range: NumberRange | null;
 }
 
+export type ProtocolDriver = "legacy" | "rs";
+export type Endianness = "little" | "big";
+export type CrcKind = "none" | "crc16_modbus" | "crc16_ibm" | "crc16_ccitt_false";
+
+export interface ProtocolConfig {
+  driver: ProtocolDriver;
+  tickMs: number;
+  periodicSend: boolean;
+  rxSync: number;
+  txHeader: number;
+  txFooter: number;
+  endianness: Endianness;
+  crc: CrcKind;
+  ditherAmpScale: number;
+  ditherFreqScale: number;
+  telemetryScale: number;
+}
+
 export interface WidgetConfig {
   title: string;
   monitors: MonitorWidget[];
   controls: ControlWidget[];
+  protocol: ProtocolConfig;
 }
 
 export interface WidgetConfigEnvelope {
@@ -116,6 +135,19 @@ export interface LockedExport {
 function fallbackConfig(): WidgetConfig {
   return {
     title: "MCU-04 · Bias stage",
+    protocol: {
+      driver: "rs",
+      tickMs: 300,
+      periodicSend: true,
+      rxSync: 0xfc,
+      txHeader: 0xfc,
+      txFooter: 0x00,
+      endianness: "big",
+      crc: "none",
+      ditherAmpScale: 1000,
+      ditherFreqScale: 1,
+      telemetryScale: 100,
+    },
     monitors: [
       {
         id: "theta0",

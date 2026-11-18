@@ -1,43 +1,24 @@
 //! Wire protocol between this app (master) and the bias controller MCU (slave).
 //!
-//! The master owns the serial clock and polls the MCU for telemetry by sending a
-//! query frame every `TICK_MS` (300 ms). Command frames (state snapshots and
-//! calibration requests) are sent on demand when the user explicitly triggers
-//! them.
+//! Protocol behavior is driven by the `[protocol]` section of the widget/config
+//! TOML (`crate::config::ProtocolConfig`), which is editable in editor builds and
+//! embedded/fixed in configuration-locked customer builds.
 //!
-//! # Replacing the frame format
-//!
-//! All bytes that ever leave the serial port are produced by [`encode_query`],
-//! [`encode_state`] and [`encode_calibrate`]. When the real byte layout is
-//! known, replace only those functions (and the [`DeviceState`] fields if the MCU
-//! expects a different payload) and the rest of the app keeps working unchanged.
-//!
-//! The app supports selectable outbound formats for master frames. The current
-//! placeholder **text** format is an ASCII line so it can be inspected with any
-//! serial monitor:
-//!
-//! ```text
-//! QUERY seq=41\n
-//! STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0 gain=1.000 offset=0.000\n
-//! CAL seq=43\n
-//! ```
-//!
-//! The **binary** format is a compact placeholder encoding (tag + sequence +
-//! fields, little-endian) intended for development; replace it with the real MCU
-//! binary layout when known.
-//!
-//! Inbound telemetry is line based. The app understands placeholder `TLM`
-//! lines and forwards the parsed values to the monitor cards:
-//!
-//! ```text
-//! TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 ibias=0.4 vsupply=12.1 phase=1.5 lock=1\n
-//! ```
+//! Supported drivers:
+//! - `legacy`: periodic QUERY poll and on-demand STATE/CAL frames, with selectable
+//!   text/binary placeholder encoding (`WireFormat`) for development.
+//! - `rs`: RSProtocol-style fixed binary packets (configurable sync/type/CRC/
+//!   endianness and basic field scaling). Outbound frames map the app's command
+//!   state to a slave/command packet; inbound frames map master/telemetry packets
+//!   into `TelemetryPatch`.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Outbound wire format for master-generated frames (query/state/calibrate).
+use crate::config::{CrcKind, Endianness, ProtocolConfig, ProtocolDriver};
+
+/// Legacy outbound wire format for master-generated query/command frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireFormat {
@@ -73,7 +54,7 @@ impl fmt::Display for BiasPoint {
 }
 
 impl BiasPoint {
-    fn as_u8(self) -> u8 {
+    pub fn as_u8(self) -> u8 {
         match self {
             BiasPoint::QuadPlus => 0,
             BiasPoint::QuadMinus => 1,
@@ -81,15 +62,19 @@ impl BiasPoint {
             BiasPoint::Null => 3,
         }
     }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(BiasPoint::QuadPlus),
+            1 => Some(BiasPoint::QuadMinus),
+            2 => Some(BiasPoint::Max),
+            3 => Some(BiasPoint::Null),
+            _ => None,
+        }
+    }
 }
 
 /// Everything the UI can control on the MCU.
-///
-/// Temperature and bias voltage are monitored only; they are deliberately not
-/// part of the writable state.
-///
-/// This is the single source of truth that the 300 ms loop serialises and
-/// writes. The UI updates it through the `set_state` command.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DeviceState {
@@ -97,13 +82,13 @@ pub struct DeviceState {
     pub bias_enabled: bool,
     /// Bias operating point.
     pub bias_point: BiasPoint,
-    /// Dither amplitude (unit chosen by the MCU; V by default in the UI).
+    /// Dither amplitude (UI units).
     pub dither_amp: f32,
     /// Dither frequency (Hz).
     pub dither_freq: f32,
     /// Operating mode passed through to the MCU.
     pub mode: u8,
-    /// Loop gain (dimensionless unless the MCU defines otherwise).
+    /// Loop gain.
     pub gain: f32,
     /// Loop offset / trim.
     pub offset: f32,
@@ -123,9 +108,10 @@ impl Default for DeviceState {
     }
 }
 
-/// Encode a periodic query frame that requests the latest telemetry from the MCU.
-///
-/// `seq` wraps at `u32::MAX` and lets the MCU detect dropped frames.
+/* -------------------------------------------------------------------------- */
+/* Legacy (QUERY/STATE/CAL)                                                   */
+/* -------------------------------------------------------------------------- */
+
 pub fn encode_query(seq: u32, format: WireFormat) -> Vec<u8> {
     match format {
         WireFormat::Text => format!("QUERY seq={seq}\n").into_bytes(),
@@ -139,9 +125,6 @@ pub fn encode_query(seq: u32, format: WireFormat) -> Vec<u8> {
     }
 }
 
-/// Encode one state snapshot as a command frame ready to write to the serial port.
-///
-/// `seq` wraps at `u32::MAX` and lets the MCU detect dropped frames.
 pub fn encode_state(seq: u32, state: &DeviceState, format: WireFormat) -> Vec<u8> {
     match format {
         WireFormat::Text => format!(
@@ -172,7 +155,6 @@ pub fn encode_state(seq: u32, state: &DeviceState, format: WireFormat) -> Vec<u8
     }
 }
 
-/// Encode a one-shot calibration command.
 pub fn encode_calibrate(seq: u32, format: WireFormat) -> Vec<u8> {
     match format {
         WireFormat::Text => format!("CAL seq={seq}\n").into_bytes(),
@@ -183,6 +165,235 @@ pub fn encode_calibrate(seq: u32, format: WireFormat) -> Vec<u8> {
             out.push(b'\n');
             out
         }
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* RSProtocol-style binary packets (configurable)                             */
+/* -------------------------------------------------------------------------- */
+
+fn clamp_u16(value: f64) -> u16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    if value <= 0.0 {
+        0
+    } else if value >= u16::MAX as f64 {
+        u16::MAX
+    } else {
+        value.round() as u16
+    }
+}
+
+fn put_u16(out: &mut Vec<u8>, value: u16, endian: Endianness) {
+    match endian {
+        Endianness::Little => out.extend_from_slice(&value.to_le_bytes()),
+        Endianness::Big => out.extend_from_slice(&value.to_be_bytes()),
+    }
+}
+
+fn get_u16(bytes: &[u8], endian: Endianness) -> Option<u16> {
+    let arr: [u8; 2] = bytes.try_into().ok()?;
+    Some(match endian {
+        Endianness::Little => u16::from_le_bytes(arr),
+        Endianness::Big => u16::from_be_bytes(arr),
+    })
+}
+
+fn crc16(kind: CrcKind, data: &[u8]) -> u16 {
+    match kind {
+        CrcKind::None => 0,
+        CrcKind::Crc16Modbus => {
+            let mut crc: u16 = 0xFFFF;
+            for &b in data {
+                crc ^= b as u16;
+                for _ in 0..8 {
+                    if (crc & 1) != 0 {
+                        crc = (crc >> 1) ^ 0xA001;
+                    } else {
+                        crc >>= 1;
+                    }
+                }
+            }
+            crc
+        }
+        CrcKind::Crc16Ibm => {
+            let mut crc: u16 = 0x0000;
+            for &b in data {
+                crc ^= b as u16;
+                for _ in 0..8 {
+                    if (crc & 1) != 0 {
+                        crc = (crc >> 1) ^ 0xA001;
+                    } else {
+                        crc >>= 1;
+                    }
+                }
+            }
+            crc
+        }
+        CrcKind::Crc16CcittFalse => {
+            let mut crc: u16 = 0xFFFF;
+            for &b in data {
+                crc ^= (b as u16) << 8;
+                for _ in 0..8 {
+                    if (crc & 0x8000) != 0 {
+                        crc = (crc << 1) ^ 0x1021;
+                    } else {
+                        crc <<= 1;
+                    }
+                }
+            }
+            crc
+        }
+    }
+}
+
+/// Encode an RSProtocol-style slave/command packet from the current state.
+///
+/// Matches the provided RSProtocol.cpp `send(SlavePacket)` layout:
+/// `[txHeader][ditherAmp u16][ditherFreq u16][biasPoint u16][ditherOn u16]
+///  [calibrationRequest u16][rst0 u16][rst1 u16][rst2 u16][txFooter]`
+/// (18 bytes, uint16 fields in configured endianness; default big-endian).
+/// Extra UI state is mapped into reserved slots for flexibility:
+/// `rst0=mode`, `rst1=gain*telemetryScale`, `rst2=offset encoded`.
+pub fn encode_rs_slave(
+    state: &DeviceState,
+    calibration_request: bool,
+    cfg: &ProtocolConfig,
+) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(20);
+    frame.push(cfg.tx_header);
+
+    let amp = clamp_u16(state.dither_amp as f64 * cfg.dither_amp_scale);
+    let freq = clamp_u16(state.dither_freq as f64 * cfg.dither_freq_scale);
+    let bp = state.bias_point.as_u8() as u16;
+    let on = u16::from(state.bias_enabled);
+    let cal = u16::from(calibration_request);
+    let rst0 = state.mode as u16;
+    let rst1 = clamp_u16(state.gain as f64 * cfg.telemetry_scale);
+    let rst2 = clamp_u16((state.offset as f64 + 32768.0).max(0.0));
+
+    for value in [amp, freq, bp, on, cal, rst0, rst1, rst2] {
+        put_u16(&mut frame, value, cfg.endianness);
+    }
+
+    frame.push(cfg.tx_footer);
+
+    // cpp computes CRC but does not transmit it; append only if explicitly enabled.
+    if cfg.crc != CrcKind::None {
+        let c = crc16(cfg.crc, &frame[1..]);
+        put_u16(&mut frame, c, cfg.endianness);
+    }
+
+    frame
+}
+
+/// Try to decode one RSProtocol-style master/telemetry packet from `buf`.
+///
+/// Matches the provided RSProtocol.cpp receive path:
+/// fixed 20-byte frame starting with `rxSync` (default 0xFC):
+/// `[sync][biasVoltage u16][inputPower u16][outputPower u16][temperature u16]
+///  [calibrationDone u16][rsv0 u16][rsv1 u16][rsv2 u16][rsv3 u16][footer]`
+/// (uint16 fields in configured endianness; default big-endian). No CRC check
+/// by default (as in cpp). `rsv0..rsv3` are mapped to additional telemetry
+/// fields for flexibility.
+///
+/// Returns `(bytes_consumed, patch)`; consuming 1 byte on bad sync/type allows
+/// resynchronization.
+pub fn decode_rs_master(buf: &[u8], cfg: &ProtocolConfig) -> Option<(usize, TelemetryPatch)> {
+    if buf.is_empty() {
+        return None;
+    }
+    if buf[0] != cfg.rx_sync {
+        return Some((1, TelemetryPatch::default()));
+    }
+
+    let base_len = 20usize; // header + 9*u16 + footer
+    let crc_len = if cfg.crc == CrcKind::None { 0 } else { 2 };
+    let frame_len = base_len + crc_len;
+    if buf.len() < frame_len {
+        return None;
+    }
+
+    if cfg.crc != CrcKind::None {
+        let expected = crc16(cfg.crc, &buf[1..base_len]);
+        let got = get_u16(&buf[base_len..base_len + 2], cfg.endianness)?;
+        if expected != got {
+            return Some((1, TelemetryPatch::default()));
+        }
+    }
+
+    let mut off = 1usize;
+    let mut read = || -> Option<u16> {
+        let v = get_u16(&buf[off..off + 2], cfg.endianness)?;
+        off += 2;
+        Some(v)
+    };
+
+    let bias_voltage = read()? as f64 / cfg.telemetry_scale;
+    let input_power = read()? as f64 / cfg.telemetry_scale;
+    let output_power = read()? as f64 / cfg.telemetry_scale;
+    let temp = read()? as f64 / cfg.telemetry_scale;
+    let cal_done = read()?;
+    let rsv0 = read()? as f64 / cfg.telemetry_scale;
+    let rsv1 = read()? as f64 / cfg.telemetry_scale;
+    let rsv2 = read()? as f64 / cfg.telemetry_scale;
+    let rsv3 = read()? as f64 / cfg.telemetry_scale;
+    let _footer = buf.get(off).copied();
+
+    let patch = TelemetryPatch {
+        theta0: Some(rsv3 as f32),
+        temp: Some(temp as f32),
+        bias_voltage: Some(bias_voltage as f32),
+        input_power: Some(input_power as f32),
+        output_power: Some(output_power as f32),
+        bias_current: Some(rsv0 as f32),
+        supply_voltage: Some(rsv1 as f32),
+        phase_error: Some(rsv2 as f32),
+        lock_status: Some(if cal_done != 0 { 1.0 } else { 0.0 }),
+    };
+
+    Some((frame_len, patch))
+}
+
+/// Encode an outbound legacy/RS frame for the periodic master tick.
+pub fn encode_periodic(
+    seq: u32,
+    state: &DeviceState,
+    calibration_request: bool,
+    cfg: &ProtocolConfig,
+    legacy_format: WireFormat,
+) -> Vec<u8> {
+    match cfg.driver {
+        ProtocolDriver::Legacy => encode_query(seq, legacy_format),
+        ProtocolDriver::Rs => encode_rs_slave(state, calibration_request, cfg),
+    }
+}
+
+/// Encode an on-demand command (Send command). In RS mode this sends the slave packet.
+pub fn encode_command(
+    seq: u32,
+    state: &DeviceState,
+    calibration_request: bool,
+    cfg: &ProtocolConfig,
+    legacy_format: WireFormat,
+) -> Vec<u8> {
+    match cfg.driver {
+        ProtocolDriver::Legacy => encode_state(seq, state, legacy_format),
+        ProtocolDriver::Rs => encode_rs_slave(state, calibration_request, cfg),
+    }
+}
+
+/// Encode an on-demand calibration request.
+pub fn encode_calibration(
+    seq: u32,
+    state: &DeviceState,
+    cfg: &ProtocolConfig,
+    legacy_format: WireFormat,
+) -> Vec<u8> {
+    match cfg.driver {
+        ProtocolDriver::Legacy => encode_calibrate(seq, legacy_format),
+        ProtocolDriver::Rs => encode_rs_slave(state, true, cfg),
     }
 }
 
