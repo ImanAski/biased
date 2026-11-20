@@ -28,6 +28,7 @@
 #    ditherAmpScale  UI amplitude * scale -> uint16 wire value
 #    ditherFreqScale UI frequency * scale -> uint16 wire value
 #    telemetryScale  uint16 wire value / scale -> UI telemetry units (and gain/offset scaling)
+#                    (per-widget display scaling uses `scale` on [[monitors]] below)
 #
 #  Monitors (read-only, fed by inbound telemetry):
 #    id          unique name for this widget
@@ -40,6 +41,9 @@
 #    segments    cells drawn by the meter variant (5..40, default 20)
 #    unit        unit suffix shown next to the value
 #    digits      decimal places (default 1)
+#    scale       display multiplier for inbound telemetry (default 1.0; finite and
+#                non-zero). Applied before digits/range/threshold; wire decoding,
+#                packet templates and other widgets are unaffected.
 #    description small caption under the value
 #    range       display range: { min = 0, max = 100 }
 #    threshold   alarm limits:             { low = 10, high = 80 }

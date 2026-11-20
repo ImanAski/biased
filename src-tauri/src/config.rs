@@ -184,6 +184,8 @@ pub struct MonitorWidget {
     pub source: String,
     pub unit: String,
     pub digits: u8,
+    /// Multiplier applied to inbound telemetry before display.
+    pub scale: f64,
     pub description: String,
     pub variant: MonitorVariant,
     /// Number of samples kept by the `sparkline` variant.
@@ -319,6 +321,8 @@ struct RawMonitor {
     unit: Option<String>,
     #[serde(default = "default_digits")]
     digits: u8,
+    #[serde(default = "default_scale")]
+    scale: f64,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -449,6 +453,12 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             errors.push(format!("`{id}`: digits must be between 0 and 8"));
         }
 
+        if !raw.scale.is_finite() || raw.scale == 0.0 {
+            errors.push(format!(
+                "`{id}`: scale must be a finite non-zero number"
+            ));
+        }
+
         if !(8..=600).contains(&raw.history) {
             errors.push(format!(
                 "`{id}`: history must be between 8 and 600 samples (got {})",
@@ -473,6 +483,7 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             source,
             unit: raw.unit.unwrap_or_default(),
             digits: raw.digits.min(8),
+            scale: raw.scale,
             description: raw.description.unwrap_or_default(),
             variant: raw.variant,
             history: raw.history.clamp(8, 600),
@@ -902,6 +913,45 @@ mod tests {
         )
         .unwrap_err();
         assert!(errors.iter().any(|error| error.contains("threshold")));
+    }
+
+    #[test]
+    fn parses_monitor_scale_with_default() {
+        let config = parse(
+            r#"
+            [[monitors]]
+            id = "temp"
+            source = "temp"
+
+            [[monitors]]
+            id = "bias_mv"
+            source = "biasVoltage"
+            scale = 1000.0
+            "#,
+        )
+        .expect("layout must be valid");
+
+        assert_eq!(config.monitors[0].scale, 1.0);
+        assert_eq!(config.monitors[1].scale, 1000.0);
+    }
+
+    #[test]
+    fn rejects_invalid_monitor_scale() {
+        for scale in ["0", "nan", "inf"] {
+            let input = format!(
+                r#"
+                [[monitors]]
+                id = "temp"
+                source = "temp"
+                scale = {scale}
+                "#
+            );
+            let errors = parse(&input).unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.contains("scale")),
+                "scale = {scale} should be rejected: {errors:?}"
+            );
+        }
     }
 
     #[test]

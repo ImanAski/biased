@@ -60,6 +60,8 @@ export interface MonitorWidget {
   source: MonitorSource;
   unit: string;
   digits: number;
+  /** Multiplier applied to inbound telemetry before display. */
+  scale: number;
   description: string;
   variant: MonitorVariant;
   /** Samples retained by the sparkline variant. */
@@ -158,6 +160,7 @@ function fallbackConfig(): WidgetConfig {
         source: "theta0",
         unit: "°",
         digits: 1,
+        scale: 1,
         description: "Measured angle",
         variant: "bar",
         history: 60,
@@ -171,6 +174,7 @@ function fallbackConfig(): WidgetConfig {
         source: "temp",
         unit: "°C",
         digits: 1,
+        scale: 1,
         description: "Board temperature",
         variant: "gauge",
         history: 60,
@@ -184,6 +188,7 @@ function fallbackConfig(): WidgetConfig {
         source: "inputPower",
         unit: "W",
         digits: 2,
+        scale: 1,
         description: "Measured at input",
         variant: "meter",
         history: 60,
@@ -197,6 +202,7 @@ function fallbackConfig(): WidgetConfig {
         source: "outputPower",
         unit: "W",
         digits: 2,
+        scale: 1,
         description: "Measured at output",
         variant: "sparkline",
         history: 60,
@@ -210,6 +216,7 @@ function fallbackConfig(): WidgetConfig {
         source: "biasCurrent",
         unit: "A",
         digits: 3,
+        scale: 1,
         description: "Current through the bias stage",
         variant: "tile",
         history: 60,
@@ -223,6 +230,7 @@ function fallbackConfig(): WidgetConfig {
         source: "supplyVoltage",
         unit: "V",
         digits: 2,
+        scale: 1,
         description: "Rail feeding the output stage",
         variant: "sparkline",
         history: 60,
@@ -236,6 +244,7 @@ function fallbackConfig(): WidgetConfig {
         source: "phaseError",
         unit: "°",
         digits: 2,
+        scale: 1,
         description: "Residual loop phase error",
         variant: "gauge",
         history: 60,
@@ -249,6 +258,7 @@ function fallbackConfig(): WidgetConfig {
         source: "lockStatus",
         unit: "",
         digits: 0,
+        scale: 1,
         description: "MCU reports a locked loop",
         variant: "led",
         history: 60,
@@ -509,7 +519,10 @@ export function exportLockedBuild(target: string): Promise<LockedExport> {
 
 export function monitorValue(monitor: MonitorWidget): number | null {
   const value = telemetry[monitor.source];
-  return typeof value === "number" ? value : null;
+  if (typeof value !== "number") return null;
+  // The backend guarantees a finite non-zero scale; stay safe with preview data.
+  const scale = Number.isFinite(monitor.scale) ? monitor.scale : 1;
+  return value * scale;
 }
 
 /* -------------------------------------------------------------------------- */

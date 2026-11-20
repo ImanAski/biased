@@ -386,7 +386,7 @@ function resetDefaults() {
       </div>
       <div class="flex justify-between text-sm">
         <span class="text-muted">Application</span>
-        <span class="text-ink">v0.6.0</span>
+        <span class="text-ink">v0.6.1</span>
       </div>
     </section>
 

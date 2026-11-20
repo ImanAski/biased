@@ -58,10 +58,16 @@ history = 60                # samples kept by the sparkline variant (8..600)
 segments = 20               # cells drawn by the meter variant (5..40)
 unit = "°C"
 digits = 1
+scale = 1.0                 # multiplier for inbound telemetry (default 1.0)
 description = "Board temperature"
 range = { min = 0, max = 100 }      # bar / gauge scale
 threshold = { low = 5, high = 75 }  # LOW / HIGH alarm; both keys optional
 ```
+
+`scale` multiplies the inbound telemetry value for display (for example,
+`scale = 1000` shows volts as millivolts). It must be finite and non-zero, and
+is applied before `digits`, `range` and `threshold`, so set those in the scaled
+display units. Wire decoding, packet templates and other widgets are unaffected.
 
 `range` controls the bar, gauge or meter; `threshold` controls the warning
 state. Threshold markers are drawn on the bar and meter. Values outside a

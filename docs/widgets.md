@@ -44,6 +44,7 @@ id = "temp"
 source = "temp"
 label = "Temperature"
 unit = "°C"
+scale = 1.0
 variant = "gauge"
 range = { min = 0, max = 100 }
 threshold = { low = 5, high = 75 }
@@ -79,6 +80,7 @@ a `no data` badge. Monitors never write anything.
 | `variant`     | string  | `bar`    | `bar`, `gauge`, `sparkline`, `led`, `tile`, `meter`.          |
 | `unit`        | string  | `""`     | Display suffix only.                                         |
 | `digits`      | integer | `1`      | Decimal places, 0–8.                                         |
+| `scale`       | number  | `1.0`    | Display multiplier for telemetry; finite and non-zero.        |
 | `description` | string  | `""`     | Small caption under the value.                               |
 | `history`     | integer | `60`     | Samples kept by `sparkline`, 8–600.                          |
 | `segments`    | integer | `20`     | Cells drawn by `meter`, 5–40.                                |
@@ -130,6 +132,14 @@ those variants still show the numeric value but draw no fill. `sparkline` uses
 Thresholds are strict comparisons: a value **below** `low` is `LOW`, a value
 **above** `high` is `HIGH`, and a value exactly on a limit is nominal. Alerts
 turn the card border amber; they do not change the transmitted data.
+
+`scale` multiplies the inbound telemetry value before anything else, so
+`digits`, `range` and `threshold` are interpreted in the scaled display units.
+For example, a source already in volts with `scale = 1000` displays millivolts;
+use `range = { min = 0, max = 5000 }` to match. Scaling is presentation only:
+wire decoding, packet templates and other widgets reading the same source are
+unchanged. Keep `scale = 1.0` for an `led` monitor unless you intend to move its
+0.5 ON/OFF threshold.
 
 The `unit`, `digits`, `label` and `description` fields affect display only.
 Values outside `range` are clamped for the bar/arc/meter fill but the numeric
@@ -443,6 +453,7 @@ empty. A TOML syntax error is reported on its own. The most common rules:
 - At most 8 presets, all inside the range; `mode` presets must be integers
   from 0 to 255.
 - Monitor `digits` 0–8, `history` 8–600, `segments` 5–40.
+- Monitor `scale` must be a finite, non-zero number (default `1.0`).
 - Monitor ranges need finite `min < max`; thresholds need finite values and,
   when both are present, `low < high`.
 - Unknown keys at any level are rejected.
@@ -467,3 +478,5 @@ empty. A TOML syntax error is reported on its own. The most common rules:
   pending command snapshot, but the app only polls with `QUERY` frames in the
   background. Click **Send command** to transmit the current snapshot as a
   `STATE` command frame.
+- **Values look wrong by a constant factor** — check the monitor `scale` and
+  the `[protocol] telemetryScale` wire factor; `scale` changes display only.
