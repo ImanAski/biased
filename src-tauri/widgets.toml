@@ -16,12 +16,13 @@
 #  executable, so protocol/layout choices made here become fixed for that build.
 #
 #  [protocol] (wire behavior; editable in editor builds, locked in customer):
-#    driver          "rs" (RSProtocol-style binary packets) or "legacy"
+#    driver          "rs" (master-driven binary transactions) or "legacy"
 #    tickMs          master clock period in ms (10..60000)
-#    periodicSend    send outbound packet/frame on every tick when connected
-#    rxSync          expected sync/header byte for received master telemetry (e.g. 0xFC)
-#    txHeader        header byte for transmitted slave/command frames
-#    txFooter        footer byte for transmitted slave/command frames
+#    periodicSend    send the 2-byte status read on every tick when connected
+#    rxSync          header for status reads and received telemetry frames (0x77)
+#    txHeader        header for write/command frames and their ACK (0x71)
+#    rxFooter        footer for status reads, telemetry frames and ACKs (0x23)
+#    txFooter        footer byte for transmitted write/command frames
 #    endianness      "little" or "big" for uint16 wire fields
 #    crc             "none" | "crc16_modbus" | "crc16_ibm" | "crc16_ccitt_false"
 #    ditherAmpScale  UI amplitude * scale -> uint16 wire value
@@ -54,8 +55,9 @@ title = "MCU-04 · Bias stage"
 driver = "rs"
 tickMs = 300
 periodicSend = true
-rxSync = 0xFC
-txHeader = 0xFC
+rxSync = 0x77
+txHeader = 0x71
+rxFooter = 0x23
 txFooter = 0x00
 endianness = "big"
 crc = "none"

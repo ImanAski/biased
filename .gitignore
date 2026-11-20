@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local/personal notes (not committed)
+PRESENTATION_NOTES.md

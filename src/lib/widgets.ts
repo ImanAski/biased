@@ -93,6 +93,8 @@ export interface ProtocolConfig {
   periodicSend: boolean;
   rxSync: number;
   txHeader: number;
+  /** Footer shared by status reads, telemetry responses and write ACKs. */
+  rxFooter: number;
   txFooter: number;
   endianness: Endianness;
   crc: CrcKind;
@@ -139,8 +141,9 @@ function fallbackConfig(): WidgetConfig {
       driver: "rs",
       tickMs: 300,
       periodicSend: true,
-      rxSync: 0xfc,
-      txHeader: 0xfc,
+      rxSync: 0x77,
+      txHeader: 0x71,
+      rxFooter: 0x23,
       txFooter: 0x00,
       endianness: "big",
       crc: "none",

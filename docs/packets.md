@@ -5,54 +5,63 @@ script, and how the Packet Lab is excluded from customer builds.
 
 ## Packet paths at a glance
 
-| Direction | Producer | Timing | Payload |
-| --------- | -------- | ------ | ------- |
-| TX | Master clock (`src-tauri/src/lib.rs`) | every 300 ms | `QUERY …\n` poll |
-| TX | Send command | one shot | `STATE …\n` command snapshot |
-| TX | Calibrate command | one shot | `CAL …\n` |
+| Direction | Producer | Timing | Payload (default `rs` driver) |
+| --------- | -------- | ------ | ----------------------------- |
+| TX | Master clock (`src-tauri/src/lib.rs`) | every 300 ms | `77 23` status read |
+| TX | Send command | one shot | `71 …` write (command snapshot) |
+| TX | Calibrate command | one shot | `71 …` write (calibration flag) |
 | TX | Packet Lab | manual or scheduled | template-expanded bytes from the script |
-| RX | Serial reader | whenever bytes arrive | raw chunks + `TLM …\n` lines |
+| RX | Serial reader | after every read | `77 … 23` data frame, or `71 23` write ACK |
 | RX | Packet Lab “Inject” | manual | synthetic chunk + telemetry |
 
-The master clock is owned by Rust and continuously polls the MCU for telemetry.
-The UI pushes the newest command snapshot to the backend; clicking **Send
-command** writes that snapshot immediately as a command packet.
+The app is the master: the Rust-owned clock starts a new transaction every tick
+by requesting status, and the MCU answers with the telemetry frame that feeds
+the monitor cards. Writes only happen when the user clicks **Send command** or
+**Calibrate**; the MCU replies with a two-byte acknowledge that is consumed
+without producing telemetry.
 
-## Outbound master frames
+## Master frames
 
-Master-generated frames use the selected wire format (editable builds can choose
-**text** or **binary** in Settings; customer builds use a fixed format).
+### RS driver (default)
 
-In **text (ASCII)** format:
+`protocol::encode_rs_status_read` produces the two-byte tick frame;
+`protocol::encode_rs_slave` produces write frames for **Send command** and
+**Calibrate**. The `calibrationRequest` field of a write distinguishes them.
 
-`protocol::encode_query` produces the periodic polling frame sent by the master
-clock:
+```text
+read:   77 23
+write:  71 <amp u16><freq u16><biasPoint u16><ditherOn u16>
+           <calibrationRequest u16><rst0 u16><rst1 u16><rst2 u16><txFooter>
+ack:    71 23
+data:   77 <biasVoltage u16><inputPower u16><outputPower u16><temperature u16>
+           <calibrationDone u16><rsv0 u16><rsv1 u16><rsv2 u16><rsv3 u16> 23
+```
+
+Framing bytes (`rxSync` = `77`, `txHeader` = `71`, `rxFooter` = `23`,
+`txFooter`), endianness, CRC and scaling are configurable under `[protocol]` in
+`widgets.toml`. `protocol::decode_rs_master` consumes both response shapes and
+publishes only data frames as telemetry.
+
+### Legacy driver
+
+With `driver = "legacy"`, frames use the selected wire format (editable builds
+can choose **text** or **binary** in Settings; customer builds use a fixed
+format). In **text (ASCII)** format:
 
 ```text
 QUERY seq=41\n
-```
-
-`protocol::encode_state` produces a one-shot command snapshot when the user
-clicks **Send command**:
-
-```text
 STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0 gain=1.000 offset=0.000\n
-```
-
-`protocol::encode_calibrate` produces the one-shot calibration command:
-
-```text
 CAL seq=43\n
 ```
 
-In **binary** format, the same frames are emitted as compact placeholder
-tagged/packed bytes (see `src-tauri/src/protocol.rs`) and should be replaced
-with the real MCU binary layout when known.
+`QUERY` is the periodic polling frame, `STATE` the on-demand command snapshot
+and `CAL` the calibration command. Binary mode emits compact placeholder
+tagged/packed bytes (see `src-tauri/src/protocol.rs`).
 
-`seq` is a wrapping `u32` counter owned by the backend and shared across query
-and command frames. A scheduled Packet Lab payload is template-expanded, encoded
-and then written independently of the periodic query tick; the schedules do not
-merge or re-frame each other.
+`seq` is a wrapping `u32` counter owned by the backend and used by legacy frames.
+A scheduled Packet Lab payload is template-expanded, encoded and then written
+independently of the periodic tick; the schedules do not merge or re-frame each
+other.
 
 ## Packet Lab packet model
 

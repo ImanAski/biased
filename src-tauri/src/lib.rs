@@ -1,16 +1,17 @@
 //! Tauri backend for the bias controller.
 //!
-//! This app is the **master** on the serial link: a background thread wakes up
-//! every [`TICK_MS`] and writes a query frame to poll the MCU for telemetry.
-//! Command frames (state snapshots and calibration requests) are sent on demand
-//! when the user explicitly triggers them; the frontend pushes state changes
-//! through the `set_state` command so the latest snapshot is ready when a command
-//! is sent.
+//! This app is the **master** on the serial link and starts every transaction:
+//! a background thread wakes up every configured tick (300 ms by default) and writes a two-byte status
+//! read in RS mode (a legacy `QUERY` frame otherwise). Command writes (state
+//! snapshots and calibration requests) are sent on demand when the user
+//! explicitly triggers them; the frontend pushes state changes through the
+//! `set_state` command so the latest snapshot is ready when a command is sent.
 //!
 //! A reader thread mirrors inbound bytes to the Packet Lab page and parses
-//! telemetry lines for the monitor cards. The Packet Lab can also start a
-//! separate packet scheduler that writes arbitrary payloads at a configurable
-//! interval, independently of the query tick.
+//! telemetry frames/lines for the monitor cards, silently consuming write
+//! acknowledges. The Packet Lab can also start a separate packet scheduler that
+//! writes arbitrary payloads at a configurable interval, independently of the
+//! master tick.
 
 mod config;
 mod locking;
@@ -56,8 +57,6 @@ struct Inner {
     wire_format: protocol::WireFormat,
     /// Active protocol configuration (from widget/config TOML; locked in customer builds).
     protocol_cfg: config::ProtocolConfig,
-    /// One-shot calibration flag for RSProtocol packets.
-    calibration_request: bool,
     reader_stop: Option<Arc<AtomicBool>>,
     reader_handle: Option<JoinHandle<()>>,
     sender_stop: Option<Arc<AtomicBool>>,
@@ -80,7 +79,6 @@ impl Inner {
             packet_seq: 0,
             wire_format: protocol::WireFormat::Text,
             protocol_cfg: config::ProtocolConfig::default(),
-            calibration_request: false,
             reader_stop: None,
             reader_handle: None,
             sender_stop: None,
@@ -174,36 +172,43 @@ impl SerialManager {
         let shared = Arc::clone(&self.shared);
 
         thread::spawn(move || {
-            let mut next = Instant::now() + Duration::from_millis(300);
+            let mut next = Instant::now();
+            let mut primed = false;
 
             loop {
                 let now = Instant::now();
-                if next > now {
-                    thread::sleep(next - now);
-                } else {
-                    next = now;
+                if primed {
+                    if next > now {
+                        thread::sleep(next - now);
+                    } else {
+                        next = now;
+                    }
                 }
 
                 let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+                // The interval is read every tick, so a config reload takes
+                // effect without restarting the clock. The first tick is
+                // scheduled from the loaded config instead of a fixed 300 ms.
                 let tick = Duration::from_millis(inner.protocol_cfg.tick_ms.max(10));
-                next += tick;
+                next = if primed {
+                    next + tick
+                } else {
+                    Instant::now() + tick
+                };
+                primed = true;
 
                 if inner.port.is_none() || !inner.protocol_cfg.periodic_send {
                     continue;
                 }
 
                 inner.seq = inner.seq.wrapping_add(1);
-                let cal = inner.calibration_request;
+                // A tick is a status read in RS mode; no write state is involved.
                 let frame = protocol::encode_periodic(
                     inner.seq,
                     &inner.state,
-                    cal,
                     &inner.protocol_cfg,
                     inner.wire_format,
                 );
-                if inner.protocol_cfg.driver == config::ProtocolDriver::Rs && cal {
-                    inner.calibration_request = false;
-                }
 
                 let result = match inner.port.as_mut() {
                     Some(port) => port.write_all(&frame).and_then(|()| port.flush()),
@@ -1078,17 +1083,13 @@ fn send_now(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status,
     let mut inner = manager.lock();
 
     inner.seq = inner.seq.wrapping_add(1);
-    let cal = inner.calibration_request;
+    // Send command is a write with calibrationRequest = 0 in RS mode.
     let frame = protocol::encode_command(
         inner.seq,
         &inner.state,
-        cal,
         &inner.protocol_cfg,
         inner.wire_format,
     );
-    if inner.protocol_cfg.driver == config::ProtocolDriver::Rs && cal {
-        inner.calibration_request = false;
-    }
     if let Err(err) = inner.write_immediate(&frame) {
         let status = inner.status();
         let _ = app.emit("serial://status", status);
@@ -1111,17 +1112,13 @@ fn calibrate(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status
     let mut inner = manager.lock();
 
     inner.seq = inner.seq.wrapping_add(1);
-    inner.calibration_request = true;
+    // Calibrate is the same write, but with calibrationRequest = 1 in RS mode.
     let frame = protocol::encode_calibration(
         inner.seq,
         &inner.state,
         &inner.protocol_cfg,
         inner.wire_format,
     );
-    if inner.protocol_cfg.driver == config::ProtocolDriver::Rs {
-        // RS packet carries calibrationRequest flag; clear after this send.
-        inner.calibration_request = false;
-    }
     if let Err(err) = inner.write_immediate(&frame) {
         let status = inner.status();
         let _ = app.emit("serial://status", status);

@@ -7,10 +7,19 @@
 //! Supported drivers:
 //! - `legacy`: periodic QUERY poll and on-demand STATE/CAL frames, with selectable
 //!   text/binary placeholder encoding (`WireFormat`) for development.
-//! - `rs`: RSProtocol-style fixed binary packets (configurable sync/type/CRC/
-//!   endianness and basic field scaling). Outbound frames map the app's command
-//!   state to a slave/command packet; inbound frames map master/telemetry packets
-//!   into `TelemetryPatch`.
+//! - `rs`: master-driven RSProtocol-style binary transactions (configurable
+//!   framing, endianness and basic field scaling). The master tick sends a
+//!   two-byte status read; on-demand writes carry the command state and are
+//!   acknowledged by the slave. Inbound telemetry frames map into
+//!   `TelemetryPatch`.
+//!
+//! RS wire framing:
+//! ```text
+//! master -> slave  read:   [rx_sync=0x77][rx_footer=0x23]
+//! master -> slave  write:  [tx_header=0x71][8 x uint16][tx_footer]
+//! slave -> master  ack:    [tx_header=0x71][rx_footer=0x23]
+//! slave -> master  data:   [rx_sync=0x77][9 x uint16][rx_footer=0x23]
+//! ```
 
 use std::fmt;
 
@@ -248,7 +257,10 @@ fn crc16(kind: CrcKind, data: &[u8]) -> u16 {
     }
 }
 
-/// Encode an RSProtocol-style slave/command packet from the current state.
+/// Encode an RSProtocol-style write/command packet from the current state.
+///
+/// This is only sent on demand (Send command / Calibrate). The slave answers
+/// with a two-byte acknowledge; the periodic tick sends a status read instead.
 ///
 /// Matches the provided RSProtocol.cpp `send(SlavePacket)` layout:
 /// `[txHeader][ditherAmp u16][ditherFreq u16][biasPoint u16][ditherOn u16]
@@ -288,39 +300,64 @@ pub fn encode_rs_slave(
     frame
 }
 
-/// Try to decode one RSProtocol-style master/telemetry packet from `buf`.
+/// Build the two-byte status read request written on every RS master tick.
 ///
-/// Matches the provided RSProtocol.cpp receive path:
-/// fixed 20-byte frame starting with `rxSync` (default 0xFC):
-/// `[sync][biasVoltage u16][inputPower u16][outputPower u16][temperature u16]
-///  [calibrationDone u16][rsv0 u16][rsv1 u16][rsv2 u16][rsv3 u16][footer]`
-/// (uint16 fields in configured endianness; default big-endian). No CRC check
-/// by default (as in cpp). `rsv0..rsv3` are mapped to additional telemetry
-/// fields for flexibility.
+/// The slave answers with a telemetry frame of the same framing: sync byte,
+/// the data bytes, and the terminating footer.
+pub fn encode_rs_status_read(cfg: &ProtocolConfig) -> Vec<u8> {
+    vec![cfg.rx_sync, cfg.rx_footer]
+}
+
+/// Try to decode one RSProtocol-style response from `buf`.
 ///
-/// Returns `(bytes_consumed, patch)`; consuming 1 byte on bad sync/type allows
-/// resynchronization.
+/// Two response shapes are recognised:
+/// - `[tx_header][rx_footer]`: acknowledge of a write; consumed with an empty
+///   patch so it never reaches the telemetry pipeline.
+/// - `[rx_sync][biasVoltage u16][inputPower u16][outputPower u16][temperature u16]
+///   [calibrationDone u16][rsv0 u16][rsv1 u16][rsv2 u16][rsv3 u16][rx_footer]`:
+///   telemetry data (20 bytes, uint16 fields in configured endianness, default
+///   big-endian). `rsv0..rsv3` are mapped to additional telemetry fields.
+///
+/// With a CRC configured, two CRC bytes follow the frame, as in the cpp. No CRC
+/// check is performed by default (as in cpp).
+///
+/// Returns `(bytes_consumed, patch)`. An incomplete telemetry frame returns
+/// `None` so the reader can wait for the rest; bad framing consumes a single
+/// byte to allow resynchronization.
 pub fn decode_rs_master(buf: &[u8], cfg: &ProtocolConfig) -> Option<(usize, TelemetryPatch)> {
     if buf.is_empty() {
         return None;
-    }
-    if buf[0] != cfg.rx_sync {
-        return Some((1, TelemetryPatch::default()));
     }
 
     let base_len = 20usize; // header + 9*u16 + footer
     let crc_len = if cfg.crc == CrcKind::None { 0 } else { 2 };
     let frame_len = base_len + crc_len;
-    if buf.len() < frame_len {
-        return None;
-    }
 
-    if cfg.crc != CrcKind::None {
-        let expected = crc16(cfg.crc, &buf[1..base_len]);
-        let got = get_u16(&buf[base_len..base_len + 2], cfg.endianness)?;
-        if expected != got {
+    if buf[0] == cfg.rx_sync {
+        if buf.len() < frame_len {
+            return None;
+        }
+        // Reject a mis-framed frame before publishing any of its fields.
+        if buf[base_len - 1] != cfg.rx_footer {
             return Some((1, TelemetryPatch::default()));
         }
+
+        if cfg.crc != CrcKind::None {
+            let expected = crc16(cfg.crc, &buf[1..base_len]);
+            let got = get_u16(&buf[base_len..base_len + 2], cfg.endianness)?;
+            if expected != got {
+                return Some((1, TelemetryPatch::default()));
+            }
+        }
+    } else {
+        // Write acknowledge: [tx_header][rx_footer]. Consume it silently; an
+        // unexpected first byte is dropped one at a time to resynchronize.
+        let consumed = if buf[0] == cfg.tx_header && buf.get(1) == Some(&cfg.rx_footer) {
+            2
+        } else {
+            1
+        };
+        return Some((consumed, TelemetryPatch::default()));
     }
 
     let mut off = 1usize;
@@ -356,35 +393,39 @@ pub fn decode_rs_master(buf: &[u8], cfg: &ProtocolConfig) -> Option<(usize, Tele
     Some((frame_len, patch))
 }
 
-/// Encode an outbound legacy/RS frame for the periodic master tick.
+/// Encode the frame for the periodic master tick.
+///
+/// In RS mode the tick is a status read only. Writes (including calibration)
+/// never happen on the clock: they are sent by `encode_command` /
+/// `encode_calibration` when the user acts.
 pub fn encode_periodic(
     seq: u32,
-    state: &DeviceState,
-    calibration_request: bool,
+    _state: &DeviceState,
     cfg: &ProtocolConfig,
     legacy_format: WireFormat,
 ) -> Vec<u8> {
     match cfg.driver {
         ProtocolDriver::Legacy => encode_query(seq, legacy_format),
-        ProtocolDriver::Rs => encode_rs_slave(state, calibration_request, cfg),
+        ProtocolDriver::Rs => encode_rs_status_read(cfg),
     }
 }
 
-/// Encode an on-demand command (Send command). In RS mode this sends the slave packet.
+/// Encode the on-demand **Send command** write. In RS mode the
+/// `calibrationRequest` field is always 0; use `encode_calibration` for 1.
 pub fn encode_command(
     seq: u32,
     state: &DeviceState,
-    calibration_request: bool,
     cfg: &ProtocolConfig,
     legacy_format: WireFormat,
 ) -> Vec<u8> {
     match cfg.driver {
         ProtocolDriver::Legacy => encode_state(seq, state, legacy_format),
-        ProtocolDriver::Rs => encode_rs_slave(state, calibration_request, cfg),
+        ProtocolDriver::Rs => encode_rs_slave(state, false, cfg),
     }
 }
 
-/// Encode an on-demand calibration request.
+/// Encode the on-demand **Calibrate** write. In RS mode this is the same
+/// packet as `encode_command` with the `calibrationRequest` field set to 1.
 pub fn encode_calibration(
     seq: u32,
     state: &DeviceState,
@@ -626,5 +667,99 @@ mod tests {
 
         assert_eq!(running.temp, Some(25.0));
         assert_eq!(running.lock_status, Some(1.0));
+    }
+
+    fn telemetry_frame(cfg: &ProtocolConfig) -> Vec<u8> {
+        let mut frame = vec![cfg.rx_sync];
+        for value in [330u16, 120, 80, 2450, 1, 40, 1210, 150, 123] {
+            put_u16(&mut frame, value, cfg.endianness);
+        }
+        frame.push(cfg.rx_footer);
+        frame
+    }
+
+    #[test]
+    fn rs_tick_sends_only_a_status_read() {
+        let cfg = ProtocolConfig::default();
+        let frame = encode_periodic(9, &DeviceState::default(), &cfg, WireFormat::Text);
+
+        assert_eq!(frame, vec![0x77, 0x23]);
+        assert_eq!(encode_rs_status_read(&cfg), frame);
+    }
+
+    #[test]
+    fn rs_send_and_calibrate_are_writes_with_distinct_flags() {
+        let cfg = ProtocolConfig::default();
+        let state = DeviceState::default();
+
+        // Send command: write frame, calibrationRequest = 0.
+        let send = encode_command(1, &state, &cfg, WireFormat::Text);
+        assert_eq!(send[0], 0x71);
+        assert_eq!(send.len(), 18); // header + 8*u16 + footer
+        assert_eq!(send[17], cfg.tx_footer);
+        assert_eq!(&send[9..11], &[0x00, 0x00]);
+
+        // Calibrate: the same write frame, calibrationRequest = 1.
+        let cal = encode_calibration(2, &state, &cfg, WireFormat::Text);
+        assert_eq!(cal[0], 0x71);
+        assert_eq!(cal.len(), send.len());
+        assert_eq!(&cal[9..11], &[0x00, 0x01]);
+
+        // Everything except the calibration flag is identical.
+        let mut expected = send.clone();
+        expected[10] = 0x01;
+        assert_eq!(cal, expected);
+    }
+
+    #[test]
+    fn decodes_new_telemetry_framing() {
+        let cfg = ProtocolConfig::default();
+        let frame = telemetry_frame(&cfg);
+        let (consumed, patch) = decode_rs_master(&frame, &cfg).unwrap();
+
+        assert_eq!(consumed, frame.len());
+        assert_eq!(patch.bias_voltage, Some(3.3));
+        assert_eq!(patch.input_power, Some(1.2));
+        assert_eq!(patch.output_power, Some(0.8));
+        assert_eq!(patch.temp, Some(24.5));
+        assert_eq!(patch.lock_status, Some(1.0));
+        assert_eq!(patch.bias_current, Some(0.4));
+        assert_eq!(patch.supply_voltage, Some(12.1));
+        assert_eq!(patch.phase_error, Some(1.5));
+        assert_eq!(patch.theta0, Some(1.23));
+    }
+
+    #[test]
+    fn consumes_write_ack_without_telemetry() {
+        let cfg = ProtocolConfig::default();
+        let (consumed, patch) = decode_rs_master(&[0x71, 0x23, 0x77], &cfg).unwrap();
+
+        assert_eq!(consumed, 2);
+        assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn waits_for_partial_and_rejects_bad_footer() {
+        let cfg = ProtocolConfig::default();
+        let frame = telemetry_frame(&cfg);
+
+        assert!(decode_rs_master(&frame[..5], &cfg).is_none());
+
+        let mut bad = frame;
+        bad[19] = 0x00;
+        let (consumed, patch) = decode_rs_master(&bad, &cfg).unwrap();
+        assert_eq!(consumed, 1);
+        assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn resynchronizes_after_noise() {
+        let cfg = ProtocolConfig::default();
+        let mut buf = vec![0x00];
+        buf.extend_from_slice(&telemetry_frame(&cfg));
+
+        let (consumed, patch) = decode_rs_master(&buf, &cfg).unwrap();
+        assert_eq!(consumed, 1);
+        assert!(patch.is_empty());
     }
 }

@@ -60,12 +60,19 @@ fn default_true() -> bool {
     true
 }
 
+/// Header of the status read request and of received telemetry frames.
 fn default_rx_sync() -> u8 {
-    0xFC
+    0x77
 }
 
+/// Header of write frames and of the slave's write acknowledge.
 fn default_tx_header() -> u8 {
-    0xFC
+    0x71
+}
+
+/// Footer of status reads, telemetry responses and write acknowledges.
+fn default_rx_footer() -> u8 {
+    0x23
 }
 
 fn default_tx_footer() -> u8 {
@@ -132,11 +139,13 @@ pub struct ProtocolConfig {
     pub tick_ms: u64,
     /// When true, the master clock periodically sends the outbound packet/frame.
     pub periodic_send: bool,
-    /// RS: sync byte expected at start of received master/telemetry frames.
+    /// RS: sync byte for status read requests and received telemetry frames.
     pub rx_sync: u8,
-    /// RS: header byte written in transmitted slave/command frames.
+    /// RS: header byte for transmitted write/command frames and their ACK.
     pub tx_header: u8,
-    /// RS: footer byte written in transmitted slave/command frames.
+    /// RS: footer byte closing status reads, telemetry frames and ACKs.
+    pub rx_footer: u8,
+    /// RS: footer byte written in transmitted write/command frames.
     pub tx_footer: u8,
     pub endianness: Endianness,
     pub crc: CrcKind,
@@ -156,6 +165,7 @@ impl Default for ProtocolConfig {
             periodic_send: true,
             rx_sync: default_rx_sync(),
             tx_header: default_tx_header(),
+            rx_footer: default_rx_footer(),
             tx_footer: default_tx_footer(),
             endianness: Endianness::Big,
             crc: CrcKind::None,
@@ -268,6 +278,7 @@ struct RawProtocolConfig {
     periodic_send: bool,
     rx_sync: u8,
     tx_header: u8,
+    rx_footer: u8,
     tx_footer: u8,
     endianness: Endianness,
     crc: CrcKind,
@@ -285,6 +296,7 @@ impl Default for RawProtocolConfig {
             periodic_send: d.periodic_send,
             rx_sync: d.rx_sync,
             tx_header: d.tx_header,
+            rx_footer: d.rx_footer,
             tx_footer: d.tx_footer,
             endianness: d.endianness,
             crc: d.crc,
@@ -661,6 +673,7 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             periodic_send: p.periodic_send,
             rx_sync: p.rx_sync,
             tx_header: p.tx_header,
+            rx_footer: p.rx_footer,
             tx_footer: p.tx_footer,
             endianness: p.endianness,
             crc: p.crc,
@@ -713,6 +726,29 @@ mod tests {
                 .any(|c| c.kind == ControlKind::Stepper)
         );
         assert!(config.controls.iter().any(|c| c.kind == ControlKind::Knob));
+        assert_eq!(config.protocol.rx_sync, 0x77);
+        assert_eq!(config.protocol.tx_header, 0x71);
+        assert_eq!(config.protocol.rx_footer, 0x23);
+        assert_eq!(config.protocol.tick_ms, 300);
+    }
+
+    #[test]
+    fn parses_framing_overrides() {
+        let config = parse(
+            r#"
+            [protocol]
+            rxSync = 0x11
+            txHeader = 0x22
+            rxFooter = 0x33
+            txFooter = 0x44
+            "#,
+        )
+        .expect("layout must be valid");
+
+        assert_eq!(config.protocol.rx_sync, 0x11);
+        assert_eq!(config.protocol.tx_header, 0x22);
+        assert_eq!(config.protocol.rx_footer, 0x33);
+        assert_eq!(config.protocol.tx_footer, 0x44);
     }
 
     #[test]

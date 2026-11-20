@@ -188,10 +188,32 @@ but re-expands templates on every send; stop and start again to change the
 definitions. See [`docs/packets.md`](docs/packets.md) for the full format,
 template variables and the backend packet structure.
 
-## Wire protocol (outbound)
+## Wire protocol
 
-The master polls the MCU on every tick (300 ms by default) and sends command
-frames on demand. In the default **text (ASCII)** format:
+The app is the **master** and starts every transaction; the MCU is the slave.
+With the default `rs` driver the framing is:
+
+```text
+master -> slave  read:  77 23
+master -> slave  write: 71 <8 x uint16> <txFooter>
+slave -> master  ack:   71 23
+slave -> master  data:  77 <9 x uint16> 23
+```
+
+The 300 ms tick sends only the two-byte status read (`77 23`); the MCU replies
+with the data frame that feeds the monitor cards. Writes are sent on demand —
+**Send command** for the command snapshot, **Calibrate** for the calibration
+flag — using the same packet body with the `71` header, and the MCU answers with
+the `71 23` acknowledge. ACKs are consumed without producing telemetry.
+
+Framing bytes are configurable under `[protocol]` in `widgets.toml`
+(`rxSync`, `txHeader`, `rxFooter`, `txFooter`) along with endianness, scaling and
+the tick period; a customer build freezes those values. Scheduled Packet Lab
+payloads are template-expanded and written independently of the master tick.
+See `encode_rs_status_read`, `encode_rs_slave` and `decode_rs_master` in
+[`src-tauri/src/protocol.rs`](src-tauri/src/protocol.rs).
+
+The `legacy` driver keeps the older text (ASCII) master frames:
 
 ```text
 QUERY seq=41\n
@@ -199,15 +221,9 @@ STATE seq=42 bias=1 bp=QUAD+ amp=0.500 freq=1000.0 mode=0 gain=1.000 offset=0.00
 CAL seq=43\n
 ```
 
-`QUERY` is the periodic polling frame. `STATE` is sent when the user clicks
-**Send command**, and `CAL` is sent when the user clicks **Calibrate**. In
-editable (editor) builds, *Settings → Serial defaults → Wire format* can switch
-master-generated query/command frames between **Text (ASCII)** and **Binary
-(placeholder)**; customer builds use a fixed format. All bytes leaving the port
-are produced by `encode_query`, `encode_state` and `encode_calibrate` in
-[`src-tauri/src/protocol.rs`](src-tauri/src/protocol.rs). Scheduled Packet Lab
-payloads are template-expanded, encoded and then written independently of the
-periodic query tick.
+In editable (editor) builds, *Settings → Serial defaults → Wire format* switches
+legacy query/command frames between **Text (ASCII)** and **Binary
+(placeholder)**; customer builds use a fixed format.
 
 ## Layout
 
