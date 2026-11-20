@@ -1,6 +1,6 @@
 import { reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { inTauri, state, telemetry } from "./device";
+import { inTauri, sendStateNow, state, telemetry } from "./device";
 import { addLog } from "./logs";
 
 /* -------------------------------------------------------------------------- */
@@ -83,6 +83,8 @@ export interface ControlWidget {
   /** Quick-set values shown under range and stepper controls. */
   presets: number[];
   range: NumberRange | null;
+  /** Send the command snapshot immediately whenever this control changes. */
+  sendOnChange: boolean;
 }
 
 export type ProtocolDriver = "legacy" | "rs";
@@ -273,6 +275,7 @@ function fallbackConfig(): WidgetConfig {
         label: "Bias output",
         kind: "toggle",
         target: "biasEnabled",
+        sendOnChange: false,
         unit: "",
         description: "Master enable for the bias stage",
         options: [],
@@ -284,6 +287,7 @@ function fallbackConfig(): WidgetConfig {
         label: "Bias point",
         kind: "select",
         target: "biasPoint",
+        sendOnChange: false,
         unit: "",
         description: "Operating point of the bias loop",
         options: ["QUAD+", "QUAD-", "MAX", "NULL"],
@@ -295,6 +299,7 @@ function fallbackConfig(): WidgetConfig {
         label: "Dither amplitude",
         kind: "range",
         target: "ditherAmp",
+        sendOnChange: false,
         unit: "V",
         description: "Peak-to-peak dither amplitude",
         options: [],
@@ -306,6 +311,7 @@ function fallbackConfig(): WidgetConfig {
         label: "Dither frequency",
         kind: "range",
         target: "ditherFreq",
+        sendOnChange: false,
         unit: "Hz",
         description: "Dither tone frequency",
         options: [],
@@ -317,6 +323,7 @@ function fallbackConfig(): WidgetConfig {
         label: "Operating mode",
         kind: "select",
         target: "mode",
+        sendOnChange: false,
         unit: "",
         description: "Mode code passed through to the MCU",
         options: ["0", "1", "2", "3"],
@@ -328,6 +335,7 @@ function fallbackConfig(): WidgetConfig {
         label: "Loop gain",
         kind: "knob",
         target: "gain",
+        sendOnChange: false,
         unit: "×",
         description: "Error amplifier gain",
         options: [],
@@ -339,6 +347,7 @@ function fallbackConfig(): WidgetConfig {
         label: "Loop offset",
         kind: "stepper",
         target: "offset",
+        sendOnChange: false,
         unit: "V",
         description: "Fine trim added to the bias setpoint",
         options: [],
@@ -570,10 +579,22 @@ export function clampToControl(
   );
 }
 
+let sendTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Coalesce rapid edits (slider drags, knob turns) into one command frame. */
+function scheduleSendOnChange() {
+  if (sendTimer !== null) clearTimeout(sendTimer);
+  sendTimer = setTimeout(() => {
+    sendTimer = null;
+    void sendStateNow();
+  }, 80);
+}
+
 export function setControlValue(
   control: ControlWidget,
   value: boolean | string | number,
 ) {
+  const before = controlValue(control);
   switch (control.target) {
     case "biasEnabled":
       state.biasEnabled = Boolean(value);
@@ -603,6 +624,9 @@ export function setControlValue(
     case "offset":
       state.offset = clampToControl(control, Number(value));
       break;
+  }
+  if (control.sendOnChange && controlValue(control) !== before) {
+    scheduleSendOnChange();
   }
 }
 

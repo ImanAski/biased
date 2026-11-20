@@ -155,18 +155,20 @@ let initialized = false;
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
 let lastPushError: string | null = null;
 
-async function pushState() {
-  if (!inTauri) return;
+async function pushState(): Promise<boolean> {
+  if (!inTauri) return false;
   try {
     await invoke("set_state", { state: snapshot() });
     uiError.value = null;
     lastPushError = null;
+    return true;
   } catch (err) {
     uiError.value = String(err);
     if (lastPushError !== uiError.value) {
       lastPushError = uiError.value;
       addLog("error", `State push failed: ${uiError.value}`);
     }
+    return false;
   }
 }
 
@@ -289,6 +291,24 @@ export async function sendNow() {
   } catch (err) {
     uiError.value = String(err);
     addLog("error", `Command send failed: ${uiError.value}`);
+  }
+}
+
+/**
+ * Flush the current UI state to the backend, then transmit it immediately.
+ *
+ * `set_state` is debounced, so sending straight from a control change handler
+ * would transmit the previous snapshot. Cancel that timer, push the fresh
+ * state and then send — the same action as clicking **Send command**.
+ */
+export async function sendStateNow() {
+  if (!inTauri) return;
+  if (pushTimer !== null) {
+    clearTimeout(pushTimer);
+    pushTimer = null;
+  }
+  if (await pushState()) {
+    await sendNow();
   }
 }
 

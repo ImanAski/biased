@@ -86,7 +86,7 @@ keeps the last `history` samples, `tile` is a compact numeric readout, and
 
 ### Controls
 
-Controls update the command snapshot that is sent when the user clicks **Send command**.
+Controls update the command snapshot that is sent when the user clicks **Send command**. Set `sendOnChange = true` on a control to send that snapshot automatically whenever its value changes.
 
 ```toml
 [[controls]]
@@ -98,6 +98,7 @@ unit = "V"
 description = "Peak-to-peak dither amplitude"
 range = { min = 0, max = 10, step = 0.01 }
 presets = [0, 0.5, 1, 5]    # optional quick-set buttons
+sendOnChange = true         # send the snapshot on every change (default false)
 ```
 
 | `kind`      | Allowed `target`                   | Extra fields                        |
@@ -112,6 +113,10 @@ presets = [0, 0.5, 1, 5]    # optional quick-set buttons
 Widget ids must be unique and a target can only be controlled once, so the
 config cannot create two sliders fighting over the same field. Presets must lie
 inside the control range (at most 8 per control).
+
+`sendOnChange` (default `false`) transmits the full command snapshot as soon as
+that control changes. Rapid slider and knob edits are coalesced into one frame,
+and unchanged values send nothing. This uses the same path as **Send command**.
 
 ## Configuration-locked customer builds
 

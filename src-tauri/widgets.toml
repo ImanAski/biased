@@ -51,6 +51,8 @@
 #  Controls (writable command snapshot):
 #    id/label/kind/target/unit/description/options/presets/range as before.
 #    (kind: toggle | select | range | stepper | knob | segmented)
+#    sendOnChange  true to transmit the command snapshot whenever this control
+#                  changes (default false; rapid edits are coalesced into one frame)
 # =============================================================================
 
 title = "MCU-04 · Bias stage"

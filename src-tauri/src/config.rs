@@ -208,6 +208,8 @@ pub struct ControlWidget {
     pub options: Vec<String>,
     pub presets: Vec<f64>,
     pub range: Option<NumberRange>,
+    /// Send the command snapshot immediately whenever this control changes.
+    pub send_on_change: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +358,8 @@ struct RawControl {
     presets: Vec<f64>,
     #[serde(default)]
     range: Option<RawRange>,
+    #[serde(default)]
+    send_on_change: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -645,6 +649,7 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             options: raw.options,
             presets: raw.presets,
             range,
+            send_on_change: raw.send_on_change,
         });
     }
 
@@ -977,6 +982,32 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("already controlled"))
         );
+    }
+
+    #[test]
+    fn parses_control_send_on_change() {
+        let config = parse(
+            r#"
+            [[controls]]
+            id = "bias"
+            kind = "toggle"
+            target = "biasEnabled"
+
+            [[controls]]
+            id = "amp"
+            kind = "range"
+            target = "ditherAmp"
+            range = { min = 0, max = 1 }
+            sendOnChange = true
+            "#,
+        )
+        .expect("layout must be valid");
+
+        assert!(!config.controls[0].send_on_change);
+        assert!(config.controls[1].send_on_change);
+
+        let json = serde_json::to_value(&config.controls[1]).expect("control must serialize");
+        assert_eq!(json["sendOnChange"], true);
     }
 
     fn documentation_toml_blocks(document: &str) -> Vec<(usize, String)> {

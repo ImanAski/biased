@@ -9,7 +9,7 @@ import { locked } from "../lib/widgets";
   <div class="flex h-full min-w-80 flex-col space-y-3">
     <div class="flex flex-col space-y-1 px-3 pt-3">
       <span class="text-xl font-semibold text-ink">Bias Controller</span>
-      <span class="text-muted">desktop | v0.6.1</span>
+      <span class="text-muted">desktop | v0.6.2</span>
       <span
         v-if="locked"
         class="w-fit rounded-full bg-success/15 px-2 py-0.5 text-[11px] text-success"

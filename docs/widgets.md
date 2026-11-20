@@ -150,8 +150,10 @@ readout always shows the real value.
 Controls edit the in-memory command snapshot. The app polls the MCU with a
 `QUERY` frame every 300 ms, but it does not stream control changes
 automatically. Click **Send command** to transmit the current snapshot as a
-`STATE` command frame. Numeric values are clamped to the control range and
-snapped to `step`; `mode` is also rounded to an integer and clamped to 0–255.
+`STATE` command frame. `sendOnChange = true` makes a control transmit that same
+frame automatically whenever its value changes. Numeric values are clamped to
+the control range and snapped to `step`; `mode` is also rounded to an integer
+and clamped to 0–255.
 
 ### Control fields
 
@@ -166,9 +168,16 @@ snapped to `step`; `mode` is also rounded to an integer and clamped to 0–255.
 | `options`     | array   | `[]`     | `select` only; at least one option.                            |
 | `range`       | table   | none     | Required for `range`, `stepper`, `knob`: `{ min, max, step }`. |
 | `presets`     | array   | `[]`     | Optional quick-set buttons for `range`, `stepper`, `knob`.     |
+| `sendOnChange`| boolean | `false`  | Send the command snapshot whenever this control changes.       |
 
 A control target may appear **only once** in a layout, so two widgets cannot
 fight over the same device field.
+
+`sendOnChange` sends the **full** snapshot, not just the control that changed,
+using the same code path as **Send command**. The pending edits are flushed to
+the backend first so the frame always contains the new value. Rapid slider
+drags and knob turns are coalesced into one frame, and a change that leaves the
+value unchanged sends nothing.
 
 ### Targets
 
@@ -477,6 +486,6 @@ empty. A TOML syntax error is reported on its own. The most common rules:
 - **Control changes do not reach the MCU** — by design: controls update the
   pending command snapshot, but the app only polls with `QUERY` frames in the
   background. Click **Send command** to transmit the current snapshot as a
-  `STATE` command frame.
+  `STATE` command frame, or set `sendOnChange = true` on that control.
 - **Values look wrong by a constant factor** — check the monitor `scale` and
   the `[protocol] telemetryScale` wire factor; `scale` changes display only.
