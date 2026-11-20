@@ -80,7 +80,10 @@ a `no data` badge. Monitors never write anything.
 | `variant`     | string  | `bar`    | `bar`, `gauge`, `sparkline`, `led`, `tile`, `meter`.          |
 | `unit`        | string  | `""`     | Display suffix only.                                         |
 | `digits`      | integer | `1`      | Decimal places, 0–8.                                         |
-| `scale`       | number  | `1.0`    | Display multiplier for telemetry; finite and non-zero.        |
+| `scale`       | number  | `1.0`    | First display multiplier; finite and non-zero.               |
+| `multiply`    | number  | `1.0`    | Second display multiplier; finite and non-zero.              |
+| `offset`      | number  | `0.0`    | Value added to the telemetry; must be finite.                |
+| `offsetFirst` | boolean | `false`  | Add `offset` before both multipliers instead of after.       |
 | `description` | string  | `""`     | Small caption under the value.                               |
 | `history`     | integer | `60`     | Samples kept by `sparkline`, 8–600.                          |
 | `segments`    | integer | `20`     | Cells drawn by `meter`, 5–40.                                |
@@ -110,6 +113,20 @@ TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 ibias=0.4 vsupply=12
 | `phaseError`    | `phase`, `perr`      | °    | Residual phase error            |
 | `lockStatus`    | `lock`, `locked`     | 0/1  | Loop lock flag                  |
 
+With the `rs` driver, the last four `u16` fields of a telemetry frame are
+reserved slots whose meaning is device-specific. `[protocol.telemetrySlots]`
+maps them to sources; the default layout uses `theta0 = "rsv0"`,
+`biasCurrent = "rsv1"`, `supplyVoltage = "rsv2"` and `phaseError = "rsv3"`.
+For example, if your firmware sends θ₀ in the last slot:
+
+```toml
+[protocol.telemetrySlots]
+theta0 = "rsv3"
+biasCurrent = "rsv0"
+supplyVoltage = "rsv1"
+phaseError = "rsv2"
+```
+
 Unknown telemetry keys are ignored. In an editor build, use **Packet Lab →
 Inject** to feed a `TLM` line without hardware while designing a layout.
 
@@ -133,13 +150,58 @@ Thresholds are strict comparisons: a value **below** `low` is `LOW`, a value
 **above** `high` is `HIGH`, and a value exactly on a limit is nominal. Alerts
 turn the card border amber; they do not change the transmitted data.
 
-`scale` multiplies the inbound telemetry value before anything else, so
-`digits`, `range` and `threshold` are interpreted in the scaled display units.
-For example, a source already in volts with `scale = 1000` displays millivolts;
-use `range = { min = 0, max = 5000 }` to match. Scaling is presentation only:
+`scale`, `multiply` and `offset` form a linear display transform applied before
+`digits`, `range` and `threshold`, so those are interpreted in display units.
+By default the value is `raw * scale * multiply + offset`. With
+`offsetFirst = true` it is `(raw + offset) * scale * multiply`, which is handy
+when the offset is in wire units. `scale` and `multiply` must be finite and
+non-zero; `offset` may be zero or negative. For example, a source already in
+volts with `scale = 1000` displays millivolts; use
+`range = { min = 0, max = 5000 }` to match. All three are presentation only:
 wire decoding, packet templates and other widgets reading the same source are
-unchanged. Keep `scale = 1.0` for an `led` monitor unless you intend to move its
+unchanged. Keep the defaults for an `led` monitor unless you intend to move its
 0.5 ON/OFF threshold.
+
+### Quick calibration recipe
+
+1. Find the raw value: the wire `u16` divided by `[protocol] telemetryScale`
+   (100 by default). For frame bytes `22 a8` that is `8872 / 100 = 88.72`.
+2. Change the **factor** (`scale` or `multiply`) to move the decimal point or
+   change units. Leave the other at `1.0` unless you need two separate factors.
+3. Change the **zero point** with `offset`, in display units. Use
+   `offsetFirst = true` if your offset is in raw/wire units instead.
+4. Set `range` and `threshold` in the final display units, then press
+   **Reload** in Settings.
+
+```toml
+[[monitors]]
+id = "theta0"
+source = "theta0"
+scale = 1.0
+multiply = 1.0
+offset = -90.0              # show deviation from 90°: 88.72 -> -1.28
+offsetFirst = false
+range = { min = -90, max = 90 }
+threshold = { low = -80, high = 80 }
+
+[[monitors]]
+id = "bias_mv"
+source = "biasVoltage"
+multiply = 1000.0           # 6.74 V -> 6740 mV
+range = { min = 0, max = 10000 }
+```
+
+If a calibration trim is specified in wire units, set it *before* scaling:
+
+```toml
+[[monitors]]
+id = "bias_trimmed"
+source = "biasVoltage"
+# raw 674, offset -50 wire units, telemetryScale 100 -> 6.24 V
+multiply = 1.0
+offset = -50.0
+offsetFirst = true
+```
 
 The `unit`, `digits`, `label` and `description` fields affect display only.
 Values outside `range` are clamped for the bar/arc/meter fill but the numeric
@@ -462,7 +524,9 @@ empty. A TOML syntax error is reported on its own. The most common rules:
 - At most 8 presets, all inside the range; `mode` presets must be integers
   from 0 to 255.
 - Monitor `digits` 0–8, `history` 8–600, `segments` 5–40.
-- Monitor `scale` must be a finite, non-zero number (default `1.0`).
+- Monitor `scale` and `multiply` must be finite, non-zero numbers (default
+  `1.0`); `offset` must be finite (default `0.0`).
+- `protocol.telemetrySlots` values must be one of `rsv0`…`rsv3`.
 - Monitor ranges need finite `min < max`; thresholds need finite values and,
   when both are present, `low < high`.
 - Unknown keys at any level are rejected.
@@ -488,4 +552,10 @@ empty. A TOML syntax error is reported on its own. The most common rules:
   background. Click **Send command** to transmit the current snapshot as a
   `STATE` command frame, or set `sendOnChange = true` on that control.
 - **Values look wrong by a constant factor** — check the monitor `scale` and
-  the `[protocol] telemetryScale` wire factor; `scale` changes display only.
+  `multiply`, and the `[protocol] telemetryScale` wire factor; monitor fields
+  change display only.
+- **Values have the right factor but the wrong zero point** — set `offset`, and
+  use `offsetFirst = true` if the offset is in wire units.
+- **One `rs` telemetry source stays at zero** — check `[protocol.telemetrySlots]`;
+  the firmware may put that value in a different reserved slot (θ₀ defaults to
+  `rsv0`).

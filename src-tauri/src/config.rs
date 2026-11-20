@@ -83,6 +83,10 @@ fn default_scale() -> f64 {
     1.0
 }
 
+fn default_multiplier() -> f64 {
+    1.0
+}
+
 fn kind_label(kind: ControlKind) -> &'static str {
     match kind {
         ControlKind::Toggle => "toggle",
@@ -131,6 +135,54 @@ pub enum CrcKind {
     Crc16CcittFalse,
 }
 
+/// A reserved `u16` slot in an RS telemetry frame.
+///
+/// The first five fields have fixed meanings; `rsv0..rsv3` carry whichever
+/// extra telemetry values the firmware puts there. The slot used by each
+/// additional source is configurable because devices differ in what they send.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetrySlot {
+    #[default]
+    Rsv0,
+    Rsv1,
+    Rsv2,
+    Rsv3,
+}
+
+impl TelemetrySlot {
+    /// Zero-based offset of this slot inside the four reserved fields.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Rsv0 => 0,
+            Self::Rsv1 => 1,
+            Self::Rsv2 => 2,
+            Self::Rsv3 => 3,
+        }
+    }
+}
+
+/// Which reserved frame slot feeds each additional telemetry source.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct TelemetrySlots {
+    pub theta0: TelemetrySlot,
+    pub bias_current: TelemetrySlot,
+    pub supply_voltage: TelemetrySlot,
+    pub phase_error: TelemetrySlot,
+}
+
+impl Default for TelemetrySlots {
+    fn default() -> Self {
+        Self {
+            theta0: TelemetrySlot::Rsv0,
+            bias_current: TelemetrySlot::Rsv1,
+            supply_voltage: TelemetrySlot::Rsv2,
+            phase_error: TelemetrySlot::Rsv3,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProtocolConfig {
@@ -155,6 +207,8 @@ pub struct ProtocolConfig {
     pub dither_freq_scale: f64,
     /// Scale applied when encoding/decoding telemetry-scaled uint16 values.
     pub telemetry_scale: f64,
+    /// Reserved-slot mapping for the extra telemetry fields.
+    pub telemetry_slots: TelemetrySlots,
 }
 
 impl Default for ProtocolConfig {
@@ -172,6 +226,7 @@ impl Default for ProtocolConfig {
             dither_amp_scale: 1000.0,
             dither_freq_scale: 1.0,
             telemetry_scale: 100.0,
+            telemetry_slots: TelemetrySlots::default(),
         }
     }
 }
@@ -184,8 +239,14 @@ pub struct MonitorWidget {
     pub source: String,
     pub unit: String,
     pub digits: u8,
-    /// Multiplier applied to inbound telemetry before display.
+    /// First multiplier applied to inbound telemetry for display.
     pub scale: f64,
+    /// Second multiplier, useful for combining wire and display units.
+    pub multiply: f64,
+    /// Value added to the telemetry (in raw or display units, see `offset_first`).
+    pub offset: f64,
+    /// When true, add `offset` before applying `scale` and `multiply`.
+    pub offset_first: bool,
     pub description: String,
     pub variant: MonitorVariant,
     /// Number of samples kept by the `sparkline` variant.
@@ -289,6 +350,8 @@ struct RawProtocolConfig {
     dither_amp_scale: f64,
     dither_freq_scale: f64,
     telemetry_scale: f64,
+    #[serde(default)]
+    telemetry_slots: TelemetrySlots,
 }
 
 impl Default for RawProtocolConfig {
@@ -307,6 +370,7 @@ impl Default for RawProtocolConfig {
             dither_amp_scale: d.dither_amp_scale,
             dither_freq_scale: d.dither_freq_scale,
             telemetry_scale: d.telemetry_scale,
+            telemetry_slots: d.telemetry_slots,
         }
     }
 }
@@ -325,6 +389,12 @@ struct RawMonitor {
     digits: u8,
     #[serde(default = "default_scale")]
     scale: f64,
+    #[serde(default = "default_multiplier")]
+    multiply: f64,
+    #[serde(default)]
+    offset: f64,
+    #[serde(default)]
+    offset_first: bool,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -463,6 +533,16 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             ));
         }
 
+        if !raw.multiply.is_finite() || raw.multiply == 0.0 {
+            errors.push(format!(
+                "`{id}`: multiply must be a finite non-zero number"
+            ));
+        }
+
+        if !raw.offset.is_finite() {
+            errors.push(format!("`{id}`: offset must be a finite number"));
+        }
+
         if !(8..=600).contains(&raw.history) {
             errors.push(format!(
                 "`{id}`: history must be between 8 and 600 samples (got {})",
@@ -488,6 +568,9 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             unit: raw.unit.unwrap_or_default(),
             digits: raw.digits.min(8),
             scale: raw.scale,
+            multiply: raw.multiply,
+            offset: raw.offset,
+            offset_first: raw.offset_first,
             description: raw.description.unwrap_or_default(),
             variant: raw.variant,
             history: raw.history.clamp(8, 600),
@@ -696,6 +779,7 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             dither_amp_scale: p.dither_amp_scale,
             dither_freq_scale: p.dither_freq_scale,
             telemetry_scale: p.telemetry_scale,
+            telemetry_slots: p.telemetry_slots,
         },
     })
 }
@@ -746,6 +830,7 @@ mod tests {
         assert_eq!(config.protocol.tx_header, 0x71);
         assert_eq!(config.protocol.rx_footer, 0x23);
         assert_eq!(config.protocol.tick_ms, 300);
+        assert_eq!(config.protocol.telemetry_slots.theta0, TelemetrySlot::Rsv0);
     }
 
     #[test]
@@ -938,6 +1023,89 @@ mod tests {
 
         assert_eq!(config.monitors[0].scale, 1.0);
         assert_eq!(config.monitors[1].scale, 1000.0);
+    }
+
+    #[test]
+    fn parses_monitor_offset_and_multiply() {
+        let config = parse(
+            r#"
+            [[monitors]]
+            id = "temp"
+            source = "temp"
+
+            [[monitors]]
+            id = "bias_mv"
+            source = "biasVoltage"
+            multiply = 1000.0
+            offset = -12.5
+            offsetFirst = true
+            "#,
+        )
+        .expect("layout must be valid");
+
+        assert_eq!(config.monitors[0].multiply, 1.0);
+        assert_eq!(config.monitors[0].offset, 0.0);
+        assert!(!config.monitors[0].offset_first);
+        assert_eq!(config.monitors[1].multiply, 1000.0);
+        assert_eq!(config.monitors[1].offset, -12.5);
+        assert!(config.monitors[1].offset_first);
+
+        let json = serde_json::to_value(&config.monitors[1]).expect("monitor must serialize");
+        assert_eq!(json["multiply"], 1000.0);
+        assert_eq!(json["offset"], -12.5);
+        assert_eq!(json["offsetFirst"], true);
+    }
+
+    #[test]
+    fn rejects_invalid_monitor_offset_and_multiply() {
+        for (key, value) in [
+            ("multiply", "0"),
+            ("multiply", "nan"),
+            ("offset", "inf"),
+            ("offset", "nan"),
+        ] {
+            let input = format!(
+                r#"
+                [[monitors]]
+                id = "temp"
+                source = "temp"
+                {key} = {value}
+                "#
+            );
+            let errors = parse(&input).unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.contains(key)),
+                "{key} = {value} should be rejected: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_telemetry_slot_overrides() {
+        let config = parse(
+            r#"
+            [protocol.telemetrySlots]
+            theta0 = "rsv3"
+            biasCurrent = "rsv0"
+            supplyVoltage = "rsv1"
+            phaseError = "rsv2"
+            "#,
+        )
+        .expect("layout must be valid");
+
+        assert_eq!(config.protocol.telemetry_slots.theta0, TelemetrySlot::Rsv3);
+        assert_eq!(config.protocol.telemetry_slots.bias_current, TelemetrySlot::Rsv0);
+        assert_eq!(config.protocol.telemetry_slots.supply_voltage, TelemetrySlot::Rsv1);
+        assert_eq!(config.protocol.telemetry_slots.phase_error, TelemetrySlot::Rsv2);
+
+        let errors = parse(
+            r#"
+            [protocol.telemetrySlots]
+            theta0 = "nope"
+            "#,
+        )
+        .unwrap_err();
+        assert!(errors.iter().any(|error| error.contains("theta0")));
     }
 
     #[test]

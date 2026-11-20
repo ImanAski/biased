@@ -60,8 +60,14 @@ export interface MonitorWidget {
   source: MonitorSource;
   unit: string;
   digits: number;
-  /** Multiplier applied to inbound telemetry before display. */
+  /** First multiplier applied to inbound telemetry for display. */
   scale: number;
+  /** Second multiplier, useful for combining wire and display units. */
+  multiply: number;
+  /** Value added to the telemetry (before or after scaling, see `offsetFirst`). */
+  offset: number;
+  /** When true, add `offset` before applying `scale` and `multiply`. */
+  offsetFirst: boolean;
   description: string;
   variant: MonitorVariant;
   /** Samples retained by the sparkline variant. */
@@ -90,6 +96,15 @@ export interface ControlWidget {
 export type ProtocolDriver = "legacy" | "rs";
 export type Endianness = "little" | "big";
 export type CrcKind = "none" | "crc16_modbus" | "crc16_ibm" | "crc16_ccitt_false";
+export type TelemetrySlot = "rsv0" | "rsv1" | "rsv2" | "rsv3";
+
+/** Reserved RS frame slot used by each extra telemetry source. */
+export interface TelemetrySlots {
+  theta0: TelemetrySlot;
+  biasCurrent: TelemetrySlot;
+  supplyVoltage: TelemetrySlot;
+  phaseError: TelemetrySlot;
+}
 
 export interface ProtocolConfig {
   driver: ProtocolDriver;
@@ -105,6 +120,7 @@ export interface ProtocolConfig {
   ditherAmpScale: number;
   ditherFreqScale: number;
   telemetryScale: number;
+  telemetrySlots: TelemetrySlots;
 }
 
 export interface WidgetConfig {
@@ -154,6 +170,12 @@ function fallbackConfig(): WidgetConfig {
       ditherAmpScale: 1000,
       ditherFreqScale: 1,
       telemetryScale: 100,
+      telemetrySlots: {
+        theta0: "rsv0",
+        biasCurrent: "rsv1",
+        supplyVoltage: "rsv2",
+        phaseError: "rsv3",
+      },
     },
     monitors: [
       {
@@ -163,6 +185,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "°",
         digits: 1,
         scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
         description: "Measured angle",
         variant: "bar",
         history: 60,
@@ -177,6 +202,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "°C",
         digits: 1,
         scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
         description: "Board temperature",
         variant: "gauge",
         history: 60,
@@ -191,6 +219,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "W",
         digits: 2,
         scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
         description: "Measured at input",
         variant: "meter",
         history: 60,
@@ -205,6 +236,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "W",
         digits: 2,
         scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
         description: "Measured at output",
         variant: "sparkline",
         history: 60,
@@ -219,6 +253,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "A",
         digits: 3,
         scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
         description: "Current through the bias stage",
         variant: "tile",
         history: 60,
@@ -233,6 +270,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "V",
         digits: 2,
         scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
         description: "Rail feeding the output stage",
         variant: "sparkline",
         history: 60,
@@ -247,6 +287,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "°",
         digits: 2,
         scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
         description: "Residual loop phase error",
         variant: "gauge",
         history: 60,
@@ -261,6 +304,9 @@ function fallbackConfig(): WidgetConfig {
         unit: "",
         digits: 0,
         scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
         description: "MCU reports a locked loop",
         variant: "led",
         history: 60,
@@ -528,10 +574,20 @@ export function exportLockedBuild(target: string): Promise<LockedExport> {
 
 export function monitorValue(monitor: MonitorWidget): number | null {
   const value = telemetry[monitor.source];
-  if (typeof value !== "number") return null;
-  // The backend guarantees a finite non-zero scale; stay safe with preview data.
-  const scale = Number.isFinite(monitor.scale) ? monitor.scale : 1;
-  return value * scale;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+
+  // The backend validates these; stay safe with hand-written preview data.
+  const scale =
+    Number.isFinite(monitor.scale) && monitor.scale !== 0 ? monitor.scale : 1;
+  const multiply =
+    Number.isFinite(monitor.multiply) && monitor.multiply !== 0
+      ? monitor.multiply
+      : 1;
+  const offset = Number.isFinite(monitor.offset) ? monitor.offset : 0;
+
+  return monitor.offsetFirst
+    ? (value + offset) * scale * multiply
+    : value * scale * multiply + offset;
 }
 
 /* -------------------------------------------------------------------------- */

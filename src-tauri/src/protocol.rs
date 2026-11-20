@@ -316,7 +316,8 @@ pub fn encode_rs_status_read(cfg: &ProtocolConfig) -> Vec<u8> {
 /// - `[rx_sync][biasVoltage u16][inputPower u16][outputPower u16][temperature u16]
 ///   [calibrationDone u16][rsv0 u16][rsv1 u16][rsv2 u16][rsv3 u16][rx_footer]`:
 ///   telemetry data (20 bytes, uint16 fields in configured endianness, default
-///   big-endian). `rsv0..rsv3` are mapped to additional telemetry fields.
+///   big-endian). `rsv0..rsv3` are mapped to additional telemetry fields by
+///   `[protocol.telemetrySlots]` (theta0 defaults to `rsv0`).
 ///
 /// With a CRC configured, two CRC bytes follow the frame, as in the cpp. No CRC
 /// check is performed by default (as in cpp).
@@ -367,27 +368,29 @@ pub fn decode_rs_master(buf: &[u8], cfg: &ProtocolConfig) -> Option<(usize, Tele
         Some(v)
     };
 
-    let bias_voltage = read()? as f64 / cfg.telemetry_scale;
-    let input_power = read()? as f64 / cfg.telemetry_scale;
-    let output_power = read()? as f64 / cfg.telemetry_scale;
-    let temp = read()? as f64 / cfg.telemetry_scale;
-    let cal_done = read()?;
-    let rsv0 = read()? as f64 / cfg.telemetry_scale;
-    let rsv1 = read()? as f64 / cfg.telemetry_scale;
-    let rsv2 = read()? as f64 / cfg.telemetry_scale;
-    let rsv3 = read()? as f64 / cfg.telemetry_scale;
+    let mut fields = [0u16; 9];
+    for field in &mut fields {
+        *field = read()?;
+    }
     let _footer = buf.get(off).copied();
 
+    let scaled = |index: usize| fields[index] as f64 / cfg.telemetry_scale;
+    // Fixed fields: bias, input, output, temperature, calibration flag.
+    // The last four are reserved slots whose meaning is device-specific;
+    // `[protocol.telemetrySlots]` decides which source reads each one.
+    let rsv = |slot: crate::config::TelemetrySlot| scaled(5 + slot.index()) as f32;
+    let slots = cfg.telemetry_slots;
+
     let patch = TelemetryPatch {
-        theta0: Some(rsv3 as f32),
-        temp: Some(temp as f32),
-        bias_voltage: Some(bias_voltage as f32),
-        input_power: Some(input_power as f32),
-        output_power: Some(output_power as f32),
-        bias_current: Some(rsv0 as f32),
-        supply_voltage: Some(rsv1 as f32),
-        phase_error: Some(rsv2 as f32),
-        lock_status: Some(if cal_done != 0 { 1.0 } else { 0.0 }),
+        theta0: Some(rsv(slots.theta0)),
+        temp: Some(scaled(3) as f32),
+        bias_voltage: Some(scaled(0) as f32),
+        input_power: Some(scaled(1) as f32),
+        output_power: Some(scaled(2) as f32),
+        bias_current: Some(rsv(slots.bias_current)),
+        supply_voltage: Some(rsv(slots.supply_voltage)),
+        phase_error: Some(rsv(slots.phase_error)),
+        lock_status: Some(if fields[4] != 0 { 1.0 } else { 0.0 }),
     };
 
     Some((frame_len, patch))
@@ -671,7 +674,7 @@ mod tests {
 
     fn telemetry_frame(cfg: &ProtocolConfig) -> Vec<u8> {
         let mut frame = vec![cfg.rx_sync];
-        for value in [330u16, 120, 80, 2450, 1, 40, 1210, 150, 123] {
+        for value in [330u16, 120, 80, 2450, 1, 123, 40, 1210, 150] {
             put_u16(&mut frame, value, cfg.endianness);
         }
         frame.push(cfg.rx_footer);
@@ -727,6 +730,43 @@ mod tests {
         assert_eq!(patch.supply_voltage, Some(12.1));
         assert_eq!(patch.phase_error, Some(1.5));
         assert_eq!(patch.theta0, Some(1.23));
+    }
+
+    #[test]
+    fn decodes_theta_from_rsv0_by_default() {
+        // Real frame from the bench: 22 a8 in rsv0 is theta (88.72 degrees).
+        let frame = [
+            0x77, 0x02, 0xa2, 0x00, 0x00, 0x01, 0x7f, 0x0c, 0x80, 0x00, 0x00, 0x22, 0xa8,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23,
+        ];
+        let cfg = ProtocolConfig::default();
+        let (consumed, patch) = decode_rs_master(&frame, &cfg).unwrap();
+
+        assert_eq!(consumed, frame.len());
+        assert_eq!(patch.theta0, Some(88.72));
+        assert_eq!(patch.bias_voltage, Some(6.74));
+        assert_eq!(patch.output_power, Some(3.83));
+        assert_eq!(patch.temp, Some(32.0));
+    }
+
+    #[test]
+    fn honors_configured_telemetry_slots() {
+        let cfg = ProtocolConfig {
+            telemetry_slots: crate::config::TelemetrySlots {
+                theta0: crate::config::TelemetrySlot::Rsv3,
+                bias_current: crate::config::TelemetrySlot::Rsv0,
+                supply_voltage: crate::config::TelemetrySlot::Rsv1,
+                phase_error: crate::config::TelemetrySlot::Rsv2,
+            },
+            ..ProtocolConfig::default()
+        };
+        let frame = telemetry_frame(&cfg);
+        let (_, patch) = decode_rs_master(&frame, &cfg).unwrap();
+
+        assert_eq!(patch.theta0, Some(1.5));
+        assert_eq!(patch.bias_current, Some(1.23));
+        assert_eq!(patch.supply_voltage, Some(0.4));
+        assert_eq!(patch.phase_error, Some(12.1));
     }
 
     #[test]

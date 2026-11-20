@@ -58,16 +58,21 @@ history = 60                # samples kept by the sparkline variant (8..600)
 segments = 20               # cells drawn by the meter variant (5..40)
 unit = "°C"
 digits = 1
-scale = 1.0                 # multiplier for inbound telemetry (default 1.0)
+scale = 1.0                 # first display multiplier (default 1.0)
+multiply = 1.0              # second display multiplier (default 1.0)
+offset = 0.0                # display offset (default 0.0)
+offsetFirst = false         # add offset before scaling (default false)
 description = "Board temperature"
 range = { min = 0, max = 100 }      # bar / gauge scale
 threshold = { low = 5, high = 75 }  # LOW / HIGH alarm; both keys optional
 ```
 
-`scale` multiplies the inbound telemetry value for display (for example,
-`scale = 1000` shows volts as millivolts). It must be finite and non-zero, and
-is applied before `digits`, `range` and `threshold`, so set those in the scaled
-display units. Wire decoding, packet templates and other widgets are unaffected.
+`scale`, `multiply` and `offset` apply a linear display transform:
+`raw * scale * multiply + offset`, or `(raw + offset) * scale * multiply` when
+`offsetFirst = true`. For example, `scale = 1000` shows volts as millivolts.
+Both multipliers must be finite and non-zero; the offset must be finite. The
+transform runs before `digits`, `range` and `threshold`, so set those in display
+units. Wire decoding, packet templates and other widgets are unaffected.
 
 `range` controls the bar, gauge or meter; `threshold` controls the warning
 state. Threshold markers are drawn on the bar and meter. Values outside a
@@ -154,8 +159,13 @@ TLM seq=12 theta0=12.3 temp=24.5 vbias=3.3 pin=1.2 pout=0.8 ibias=0.4 vsupply=12
 
 Accepted keys: `theta0`/`theta`, `temp`/`temperature`, `vbias`/`bias`,
 `pin`/`input`, `pout`/`output`, `ibias`/`current`, `vsupply`/`supply`,
-`phase`/`perr`, `lock`/`locked`. Unknown keys are ignored. Adjust
-`src-tauri/src/protocol.rs` when the real MCU format is known.
+`phase`/`perr`, `lock`/`locked`. Unknown keys are ignored.
+
+In the default `rs` binary mode, the last four frame fields are reserved slots.
+`[protocol.telemetrySlots]` in `widgets.toml` decides which source reads each
+one (`theta0 = "rsv0"`, `biasCurrent = "rsv1"`, `supplyVoltage = "rsv2"`,
+`phaseError = "rsv3"` by default). Change these if the firmware uses another
+layout — for example, θ₀ arriving in `rsv3`.
 
 ## Packet Lab
 

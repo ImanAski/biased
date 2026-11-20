@@ -29,6 +29,10 @@
 #    ditherFreqScale UI frequency * scale -> uint16 wire value
 #    telemetryScale  uint16 wire value / scale -> UI telemetry units (and gain/offset scaling)
 #                    (per-widget display scaling uses `scale` on [[monitors]] below)
+#    telemetrySlots  reserved u16 slot feeding each extra telemetry source:
+#                    theta0, biasCurrent, supplyVoltage, phaseError = rsv0..rsv3
+#                    (default: theta0=rsv0, biasCurrent=rsv1, supplyVoltage=rsv2,
+#                    phaseError=rsv3)
 #
 #  Monitors (read-only, fed by inbound telemetry):
 #    id          unique name for this widget
@@ -41,9 +45,14 @@
 #    segments    cells drawn by the meter variant (5..40, default 20)
 #    unit        unit suffix shown next to the value
 #    digits      decimal places (default 1)
-#    scale       display multiplier for inbound telemetry (default 1.0; finite and
-#                non-zero). Applied before digits/range/threshold; wire decoding,
-#                packet templates and other widgets are unaffected.
+#    scale       first display multiplier (default 1.0; finite and non-zero)
+#    multiply    second display multiplier (default 1.0; finite and non-zero)
+#    offset      value added to the telemetry (default 0.0; finite)
+#    offsetFirst true to add offset before scaling instead of after (default false)
+#                Display value = raw * scale * multiply + offset, or
+#                (raw + offset) * scale * multiply when offsetFirst = true.
+#                Applied before digits/range/threshold; wire decoding, packet
+#                templates and other widgets are unaffected.
 #    description small caption under the value
 #    range       display range: { min = 0, max = 100 }
 #    threshold   alarm limits:             { low = 10, high = 80 }
@@ -70,6 +79,14 @@ crc = "none"
 ditherAmpScale = 1000.0
 ditherFreqScale = 1.0
 telemetryScale = 100.0
+
+# The frame's last four u16 fields are device-specific. This controller reports
+# theta in rsv0; change these if your firmware uses different slots.
+[protocol.telemetrySlots]
+theta0 = "rsv0"
+biasCurrent = "rsv1"
+supplyVoltage = "rsv2"
+phaseError = "rsv3"
 
 # --------------------------------- Monitors ----------------------------------
 

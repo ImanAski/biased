@@ -39,8 +39,11 @@ data:   77 <biasVoltage u16><inputPower u16><outputPower u16><temperature u16>
 
 Framing bytes (`rxSync` = `77`, `txHeader` = `71`, `rxFooter` = `23`,
 `txFooter`), endianness, CRC and scaling are configurable under `[protocol]` in
-`widgets.toml`. `protocol::decode_rs_master` consumes both response shapes and
-publishes only data frames as telemetry.
+`widgets.toml`. The meaning of `rsv0..rsv3` is device-specific;
+`[protocol.telemetrySlots]` maps each reserved slot to `theta0`, `biasCurrent`,
+`supplyVoltage` or `phaseError` (θ₀ uses `rsv0` by default).
+`protocol::decode_rs_master` consumes both response shapes and publishes only
+data frames as telemetry.
 
 ### Legacy driver
 
