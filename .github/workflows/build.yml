@@ -83,9 +83,10 @@ jobs:
           releaseBody: |
             Desktop bias controller for the MCU-04 bias stage.
 
-            - TOML layouts with bar, gauge, sparkline, LED, tile and meter
-              monitors, plus toggle, segmented, select, range, stepper and knob
-              controls
+            - TOML layouts with configurable plots (source, scale/offset,
+              fixed range and reference lines) and bar, gauge, sparkline, LED,
+              tile and meter monitors, plus toggle, segmented, select, range,
+              stepper and knob controls
             - Widget reference and examples: `docs/widgets.md`
             - Configuration-locked customer exports
             - Packet Lab for raw serial inspection and scheduling, with

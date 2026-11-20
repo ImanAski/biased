@@ -26,8 +26,8 @@ import { configErrors, locked, widgetConfig } from "../lib/widgets";
     </span>
   </div>
 
-  <div class="mb-4">
-    <Plot />
+  <div v-for="plot in widgetConfig.plots" :key="plot.id" class="mb-4">
+    <Plot :plot="plot" />
   </div>
 
   <div

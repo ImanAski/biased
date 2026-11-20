@@ -1,8 +1,8 @@
 # Bias Controller
 
 Desktop master application for the MCU-04 bias stage. It owns the serial clock,
-polls the MCU with a query frame every 300 ms, renders telemetry monitor cards
-and exposes controls — both declared in a TOML file — and, in the editor build,
+polls the MCU with a query frame every 300 ms, renders telemetry plots and
+monitor cards and exposes controls — all declared in a TOML file — and, in the editor build,
 includes a packet lab for inspecting inbound bytes and scheduling raw outbound
 packets. Command packets (state snapshots and calibration) are sent on demand
 when the user clicks the corresponding action. The packet lab is not available
@@ -88,6 +88,38 @@ keeps the last `history` samples, `tile` is a compact numeric readout, and
 | `led`       | large ON/OFF indicator for 0/1 signals                           |
 | `tile`      | compact numeric tile for dense layouts                           |
 | `meter`     | segmented level meter, sized by `segments`                       |
+
+### Plots
+
+Plots are rolling trend charts rendered above the monitor cards. They use the
+same telemetry sources and display transform as monitors, plus a few chart
+options. Add one `[[plots]]` entry per chart.
+
+```toml
+[[plots]]
+id = "bias_voltage"         # unique id (shared with monitors and controls)
+label = "Bias Voltage"      # defaults to id
+source = "biasVoltage"      # same telemetry sources as monitors
+unit = "V"
+digits = 2
+description = "Rolling telemetry history"
+scale = 1.0                 # first display multiplier (default 1.0)
+multiply = 1.0              # second display multiplier (default 1.0)
+offset = 0.0                # display offset (default 0.0)
+offsetFirst = false         # add offset before scaling (default false)
+history = 90                # samples kept in the trace (8..600, default 90)
+range = { min = 0, max = 10 }       # optional fixed Y axis (default: auto-scale)
+threshold = { low = 1, high = 9 }   # optional dashed reference lines
+fill = true                 # shaded area under the trace (default true)
+grid = true                 # horizontal grid lines (default true)
+marker = true               # dot on the newest sample (default true)
+```
+
+`scale`, `multiply`, `offset` and `offsetFirst` behave exactly as for monitors:
+every incoming sample is transformed before it is plotted, so `range` and
+`threshold` are expressed in the final display units. Omit `range` to let the
+chart fit its visible samples. Multiple plots may read the same source with
+different transforms.
 
 ### Controls
 
@@ -256,10 +288,10 @@ src/
   lib/device.ts        serial state + telemetry mirror
   lib/widgets.ts       TOML layout types, loading and control binding
   lib/packets.ts       RX buffer, packet script parser and scheduler state
-  pages/main.vue       overview (monitor cards from TOML)
+  pages/main.vue       overview (plots and monitor cards from TOML)
   pages/packets.vue    Packet Lab (editor builds only)
   pages/settings.vue   layout file management + link defaults
-  components/          monitor variants, control widgets, bars, plot, logs
+  components/          plots, monitor variants, control widgets, bars, logs
 src-tauri/
   src/lib.rs           serial manager, reader, scheduler, commands
   src/template.rs      packet placeholder expansion

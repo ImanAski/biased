@@ -1,9 +1,9 @@
 # Widget layout guide
 
-The overview page is driven by a single TOML file. **Monitors** are read-only
-cards fed by inbound telemetry; **controls** write fields of the device state
-that is mirrored to the MCU. The file is presentation and limits only — it
-never changes the wire protocol.
+The overview page is driven by a single TOML file. **Plots** are rolling trend
+charts and **monitors** are read-only cards fed by inbound telemetry;
+**controls** write fields of the device state that is mirrored to the MCU. The
+file is presentation and limits only — it never changes the wire protocol.
 
 - Bundled reference layout: [`src-tauri/widgets.toml`](../src-tauri/widgets.toml)
 - Schema and validation: [`src-tauri/src/config.rs`](../src-tauri/src/config.rs)
@@ -39,6 +39,14 @@ uses its embedded layout and ignores any file on the machine (see the main
 ```toml
 title = "Bench setup"
 
+[[plots]]
+id = "bias"
+source = "biasVoltage"
+label = "Bias voltage"
+unit = "V"
+digits = 2
+history = 90
+
 [[monitors]]
 id = "temp"
 source = "temp"
@@ -61,9 +69,9 @@ presets = [0, 0.5, 1, 5]
 
 Keys are **camelCase** (`biasVoltage`, `ditherAmp`, `inputPower`) and enum
 values are **snake_case** (`sparkline`, `segmented`). Unknown keys are rejected,
-so a typo fails the load instead of being silently ignored. Monitor and control
-ids share one namespace. Empty `[[monitors]]` / `[[controls]]` sections are
-allowed.
+so a typo fails the load instead of being silently ignored. Plot, monitor and
+control ids share one namespace. Empty `[[plots]]` / `[[monitors]]` /
+`[[controls]]` sections are allowed.
 
 ## Monitors
 
@@ -207,6 +215,68 @@ The `unit`, `digits`, `label` and `description` fields affect display only.
 Values outside `range` are clamped for the bar/arc/meter fill but the numeric
 readout always shows the real value.
 
+## Plots
+
+Plots are rolling trend charts rendered above the monitor cards. Each plot
+samples one telemetry source on every update and keeps the last `history`
+values. A plot with no data yet shows a waiting message. Multiple plots can read
+the same source with different transforms or Y axes.
+
+### Plot fields
+
+| Key           | Type    | Default  | Notes                                                        |
+| ------------- | ------- | -------- | ------------------------------------------------------------ |
+| `id`          | string  | required | Unique among plots, monitors and controls; must not be empty. |
+| `source`      | string  | `id`     | Telemetry field, see the source table above.                  |
+| `label`       | string  | `id`     | Chart title.                                                 |
+| `unit`        | string  | `""`     | Display suffix for the current value and axis labels.        |
+| `digits`      | integer | `1`      | Decimal places for the current value and axis, 0–8.          |
+| `description` | string  | `""`     | Caption under the title (defaults to "Rolling telemetry history" when empty). |
+| `scale`       | number  | `1.0`    | First display multiplier; finite and non-zero.               |
+| `multiply`    | number  | `1.0`    | Second display multiplier; finite and non-zero.              |
+| `offset`      | number  | `0.0`    | Value added to the telemetry; must be finite.                |
+| `offsetFirst` | boolean | `false`  | Add `offset` before both multipliers instead of after.       |
+| `history`     | integer | `90`     | Samples kept in the trace, 8–600.                            |
+| `range`       | table   | none     | `{ min = …, max = … }`, finite `min < max`. Omit to auto-scale. |
+| `threshold`   | table   | none     | `{ low = …, high = … }`, dashed reference lines.              |
+| `fill`        | boolean | `true`   | Shade the area under the trace.                              |
+| `grid`        | boolean | `true`   | Draw horizontal grid lines.                                  |
+| `marker`      | boolean | `true`   | Highlight the newest sample with a dot.                      |
+
+Like monitors, a plot's source defaults to its `id`, so `id = "temp"` plots the
+`temp` telemetry field without a separate `source`.
+
+The same linear display transform applies to every plotted sample:
+`raw * scale * multiply + offset`, or `(raw + offset) * scale * multiply` when
+`offsetFirst = true`. `range` and `threshold` are interpreted in the final
+display units. This is presentation only: wire decoding, packet templates and
+other widgets reading the same source are unchanged.
+
+Without `range`, the Y axis fits the visible samples with a small margin (and a
+flat trace gets a ±1 band). With `range`, the axis is fixed, and samples outside
+it are clipped to the top or bottom edge. Threshold lines are only drawn when
+they fall inside the visible Y range.
+
+```toml
+[[plots]]
+id = "bias_mv"
+label = "Bias voltage (mV)"
+source = "biasVoltage"
+unit = "mV"
+digits = 0
+multiply = 1000.0           # volts -> millivolts
+offset = -12.5              # remove a known sensor bias
+history = 120
+range = { min = -100, max = 100 }
+threshold = { low = -80, high = 80 }
+fill = true
+grid = true
+marker = true
+```
+
+If the trim is in wire units, set `offsetFirst = true` so it is applied before
+`scale` and `multiply`.
+
 ## Controls
 
 Controls edit the in-memory command snapshot. The app polls the MCU with a
@@ -284,6 +354,19 @@ over the file in the config directory, then press **Reload**.
 
 ```toml
 title = "MCU-04 · Bias stage"
+
+# --- Plots ------------------------------------------------------------------
+
+[[plots]]
+id = "bias_voltage"
+label = "Bias voltage"
+source = "biasVoltage"
+unit = "V"
+digits = 2
+description = "Rolling telemetry history"
+history = 90
+range = { min = 0, max = 10 }
+threshold = { low = 1, high = 9 }
 
 # --- Monitors ---------------------------------------------------------------
 
@@ -513,8 +596,8 @@ threshold = { low = 11, high = 13 }
 Every problem found is reported; the layout is only applied when the list is
 empty. A TOML syntax error is reported on its own. The most common rules:
 
-- `id` must be non-empty and unique across **both** monitors and controls.
-- Monitor `source` must be one of the nine sources in the table above.
+- `id` must be non-empty and unique across plots, monitors and controls.
+- Plot and monitor `source` must be one of the nine sources in the table above.
 - Control `target` must be one of the seven targets and may be used only once.
 - `toggle` and `segmented` only accept `biasEnabled`; `select` only accepts
   `biasPoint` or `mode`; numeric kinds only accept the five numeric targets.
@@ -523,12 +606,13 @@ empty. A TOML syntax error is reported on its own. The most common rules:
 - Numeric kinds need a `range` with finite `min < max` and `step > 0`.
 - At most 8 presets, all inside the range; `mode` presets must be integers
   from 0 to 255.
-- Monitor `digits` 0–8, `history` 8–600, `segments` 5–40.
-- Monitor `scale` and `multiply` must be finite, non-zero numbers (default
-  `1.0`); `offset` must be finite (default `0.0`).
+- Plot and monitor `digits` 0–8; `history` 8–600 (default 90 for plots, 60 for
+  monitors); monitor `segments` 5–40.
+- Plot and monitor `scale` and `multiply` must be finite, non-zero numbers
+  (default `1.0`); `offset` must be finite (default `0.0`).
 - `protocol.telemetrySlots` values must be one of `rsv0`…`rsv3`.
-- Monitor ranges need finite `min < max`; thresholds need finite values and,
-  when both are present, `low < high`.
+- Plot and monitor ranges need finite `min < max`; thresholds need finite
+  values and, when both are present, `low < high`.
 - Unknown keys at any level are rejected.
 
 ## Troubleshooting
@@ -543,8 +627,11 @@ empty. A TOML syntax error is reported on its own. The most common rules:
   you expect. Upgrades never replace an existing file.
 - **Monitor shows `—`** — no telemetry has arrived for that source. In an
   editor build, inject a `TLM` line in Packet Lab or connect the MCU.
-- **Sparkline says “waiting for samples”** — samples arrive with telemetry;
-  the chart fills as new values come in.
+- **Sparkline or plot says “waiting for samples”** — samples arrive with
+  telemetry; the chart fills as new values come in. For a plot, also check its
+  `source` and that telemetry for that field is arriving.
+- **Plot trace is flat at the top or bottom** — the fixed `range` may be too
+  narrow for the transformed values; widen it or remove it to auto-scale.
 - **Bar, gauge or meter has no fill** — add a `range`; the numeric value still
   displays without one.
 - **Control changes do not reach the MCU** — by design: controls update the

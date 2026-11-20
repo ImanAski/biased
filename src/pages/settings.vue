@@ -294,6 +294,10 @@ function resetDefaults() {
 
       <div class="flex flex-wrap gap-4 text-xs text-muted">
         <span>
+          <span class="font-mono text-ink">{{ widgetConfig.plots.length }}</span>
+          plots
+        </span>
+        <span>
           <span class="font-mono text-ink">{{ widgetConfig.monitors.length }}</span>
           monitors
         </span>
@@ -406,7 +410,7 @@ function resetDefaults() {
       </div>
       <div class="flex justify-between text-sm">
         <span class="text-muted">Application</span>
-        <span class="text-ink">v0.6.4</span>
+        <span class="text-ink">v0.7.0</span>
       </div>
     </section>
 

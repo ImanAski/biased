@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 /// Seeded into the app config directory on first launch.
 pub const DEFAULT_TOML: &str = include_str!("../widgets.toml");
 
-/// Telemetry fields a monitor may read.
-pub const MONITOR_SOURCES: [&str; 9] = [
+/// Telemetry fields a monitor or plot may read.
+pub const TELEMETRY_SOURCES: [&str; 9] = [
     "theta0",
     "temp",
     "biasVoltage",
@@ -46,6 +46,10 @@ fn default_digits() -> u8 {
 
 fn default_history() -> u16 {
     60
+}
+
+fn default_plot_history() -> u16 {
+    90
 }
 
 fn default_segments() -> u8 {
@@ -102,6 +106,8 @@ fn kind_label(kind: ControlKind) -> &'static str {
 #[serde(rename_all = "camelCase")]
 pub struct WidgetConfig {
     pub title: String,
+    /// Rolling trend charts rendered above the monitor cards.
+    pub plots: Vec<PlotWidget>,
     pub monitors: Vec<MonitorWidget>,
     pub controls: Vec<ControlWidget>,
     pub protocol: ProtocolConfig,
@@ -257,6 +263,38 @@ pub struct MonitorWidget {
     pub threshold: Option<Threshold>,
 }
 
+/// A rolling telemetry trend chart.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlotWidget {
+    pub id: String,
+    pub label: String,
+    pub source: String,
+    pub unit: String,
+    pub digits: u8,
+    pub description: String,
+    /// First multiplier applied to inbound telemetry for display.
+    pub scale: f64,
+    /// Second multiplier, useful for combining wire and display units.
+    pub multiply: f64,
+    /// Value added to the telemetry (in raw or display units, see `offset_first`).
+    pub offset: f64,
+    /// When true, add `offset` before applying `scale` and `multiply`.
+    pub offset_first: bool,
+    /// Number of samples kept in the trace.
+    pub history: u16,
+    /// Optional fixed Y axis; the chart auto-scales when absent.
+    pub range: Option<NumberRange>,
+    /// Optional horizontal reference lines.
+    pub threshold: Option<Threshold>,
+    /// Draw the filled area under the trace.
+    pub fill: bool,
+    /// Draw horizontal grid lines.
+    pub grid: bool,
+    /// Highlight the most recent sample with a dot.
+    pub marker: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlWidget {
@@ -319,6 +357,7 @@ pub struct Threshold {
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 struct RawConfig {
     title: Option<String>,
+    plots: Vec<RawPlot>,
     monitors: Vec<RawMonitor>,
     controls: Vec<RawControl>,
     protocol: RawProtocolConfig,
@@ -328,6 +367,7 @@ impl Default for RawConfig {
     fn default() -> Self {
         Self {
             title: None,
+            plots: Vec::new(),
             monitors: Vec::new(),
             controls: Vec::new(),
             protocol: RawProtocolConfig::default(),
@@ -373,6 +413,42 @@ impl Default for RawProtocolConfig {
             telemetry_slots: d.telemetry_slots,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawPlot {
+    id: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default = "default_digits")]
+    digits: u8,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_scale")]
+    scale: f64,
+    #[serde(default = "default_multiplier")]
+    multiply: f64,
+    #[serde(default)]
+    offset: f64,
+    #[serde(default)]
+    offset_first: bool,
+    #[serde(default = "default_plot_history")]
+    history: u16,
+    #[serde(default)]
+    range: Option<RawRange>,
+    #[serde(default)]
+    threshold: Option<RawThreshold>,
+    #[serde(default = "default_true")]
+    fill: bool,
+    #[serde(default = "default_true")]
+    grid: bool,
+    #[serde(default = "default_true")]
+    marker: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -464,6 +540,111 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
     let mut errors = Vec::new();
     let mut ids = HashSet::new();
 
+    let mut plots = Vec::with_capacity(raw.plots.len());
+    for raw in raw.plots {
+        let id = raw.id.trim().to_string();
+        if id.is_empty() {
+            errors.push("plot: `id` must not be empty".into());
+            continue;
+        }
+        if !ids.insert(id.clone()) {
+            errors.push(format!("`{id}`: duplicate widget id"));
+        }
+
+        let source = raw
+            .source
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        if !TELEMETRY_SOURCES.contains(&source.as_str()) {
+            errors.push(format!(
+                "`{id}`: unknown plot source `{source}` (expected one of {})",
+                TELEMETRY_SOURCES.join(", ")
+            ));
+        }
+
+        if raw.digits > 8 {
+            errors.push(format!("`{id}`: digits must be between 0 and 8"));
+        }
+        if !raw.scale.is_finite() || raw.scale == 0.0 {
+            errors.push(format!(
+                "`{id}`: scale must be a finite non-zero number"
+            ));
+        }
+        if !raw.multiply.is_finite() || raw.multiply == 0.0 {
+            errors.push(format!(
+                "`{id}`: multiply must be a finite non-zero number"
+            ));
+        }
+        if !raw.offset.is_finite() {
+            errors.push(format!("`{id}`: offset must be a finite number"));
+        }
+        if !(8..=600).contains(&raw.history) {
+            errors.push(format!(
+                "`{id}`: history must be between 8 and 600 samples (got {})",
+                raw.history
+            ));
+        }
+
+        let range = raw.range.map(|range| {
+            if !range.min.is_finite() || !range.max.is_finite() || range.min >= range.max {
+                errors.push(format!(
+                    "`{id}`: plot range needs finite min < max (got {}..={})",
+                    range.min, range.max
+                ));
+            }
+            NumberRange {
+                min: range.min,
+                max: range.max,
+                step: None,
+            }
+        });
+
+        let threshold = raw.threshold.map(|threshold| {
+            if threshold.low.is_some_and(|low| !low.is_finite())
+                || threshold.high.is_some_and(|high| !high.is_finite())
+            {
+                errors.push(format!("`{id}`: threshold values must be finite"));
+            }
+            if let (Some(low), Some(high)) = (threshold.low, threshold.high) {
+                if low >= high {
+                    errors.push(format!(
+                        "`{id}`: threshold needs low < high (got {low}..={high})"
+                    ));
+                }
+            }
+            Threshold {
+                low: threshold.low,
+                high: threshold.high,
+            }
+        });
+
+        plots.push(PlotWidget {
+            label: raw
+                .label
+                .map(|label| label.trim().to_string())
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| id.clone()),
+            id,
+            source,
+            unit: raw.unit.unwrap_or_default(),
+            digits: raw.digits.min(8),
+            description: raw.description.unwrap_or_default(),
+            scale: raw.scale,
+            multiply: raw.multiply,
+            offset: raw.offset,
+            offset_first: raw.offset_first,
+            history: raw.history.clamp(8, 600),
+            range,
+            threshold,
+            fill: raw.fill,
+            grid: raw.grid,
+            marker: raw.marker,
+        });
+    }
+
     let mut monitors = Vec::with_capacity(raw.monitors.len());
     for raw in raw.monitors {
         let id = raw.id.trim().to_string();
@@ -483,10 +664,10 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             .unwrap_or(&id)
             .to_string();
 
-        if !MONITOR_SOURCES.contains(&source.as_str()) {
+        if !TELEMETRY_SOURCES.contains(&source.as_str()) {
             errors.push(format!(
                 "`{id}`: unknown monitor source `{source}` (expected one of {})",
-                MONITOR_SOURCES.join(", ")
+                TELEMETRY_SOURCES.join(", ")
             ));
         }
 
@@ -764,6 +945,7 @@ pub fn parse(input: &str) -> Result<WidgetConfig, Vec<String>> {
             .map(|title| title.trim().to_string())
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| "Bias controller".into()),
+        plots,
         monitors,
         controls,
         protocol: ProtocolConfig {
@@ -791,8 +973,12 @@ mod tests {
     #[test]
     fn parses_the_shipped_default() {
         let config = parse(DEFAULT_TOML).expect("default widget file must be valid");
+        assert_eq!(config.plots.len(), 1);
         assert_eq!(config.monitors.len(), 8);
         assert_eq!(config.controls.len(), 7);
+        assert_eq!(config.plots[0].source, "biasVoltage");
+        assert_eq!(config.plots[0].history, 90);
+        assert!(config.plots[0].fill && config.plots[0].grid && config.plots[0].marker);
         assert_eq!(config.monitors[0].source, "theta0");
         assert_eq!(config.monitors[0].variant, MonitorVariant::Bar);
         assert!(
@@ -1176,6 +1362,112 @@ mod tests {
 
         let json = serde_json::to_value(&config.controls[1]).expect("control must serialize");
         assert_eq!(json["sendOnChange"], true);
+    }
+
+    #[test]
+    fn parses_plot_transform_and_options() {
+        let config = parse(
+            r#"
+            [[plots]]
+            id = "bias_mv"
+            label = "Bias (mV)"
+            source = "biasVoltage"
+            unit = "mV"
+            digits = 0
+            description = "Trimmed bias trace"
+            scale = 1000.0
+            multiply = 2.0
+            offset = -12.5
+            offsetFirst = true
+            history = 120
+            range = { min = -100, max = 100 }
+            threshold = { low = -80, high = 80 }
+            fill = false
+            grid = false
+            marker = false
+            "#,
+        )
+        .expect("layout must be valid");
+
+        let plot = &config.plots[0];
+        assert_eq!(plot.label, "Bias (mV)");
+        assert_eq!(plot.source, "biasVoltage");
+        assert_eq!(plot.unit, "mV");
+        assert_eq!(plot.digits, 0);
+        assert_eq!(plot.scale, 1000.0);
+        assert_eq!(plot.multiply, 2.0);
+        assert_eq!(plot.offset, -12.5);
+        assert!(plot.offset_first);
+        assert_eq!(plot.history, 120);
+        assert_eq!(plot.range.unwrap().min, -100.0);
+        assert_eq!(plot.threshold.unwrap().high, Some(80.0));
+        assert!(!plot.fill && !plot.grid && !plot.marker);
+
+        let json = serde_json::to_value(plot).expect("plot must serialize");
+        assert_eq!(json["offsetFirst"], true);
+        assert_eq!(json["history"], 120);
+        assert_eq!(json["fill"], false);
+    }
+
+    #[test]
+    fn plot_defaults_match_the_legacy_chart() {
+        let config = parse(
+            r#"
+            [[plots]]
+            id = "biasVoltage"
+            "#,
+        )
+        .expect("layout must be valid");
+
+        let plot = &config.plots[0];
+        assert_eq!(plot.source, "biasVoltage");
+        assert_eq!(plot.label, "biasVoltage");
+        assert_eq!(plot.digits, 1);
+        assert_eq!(plot.scale, 1.0);
+        assert_eq!(plot.multiply, 1.0);
+        assert_eq!(plot.offset, 0.0);
+        assert!(!plot.offset_first);
+        assert_eq!(plot.history, 90);
+        assert!(plot.range.is_none() && plot.threshold.is_none());
+        assert!(plot.fill && plot.grid && plot.marker);
+    }
+
+    #[test]
+    fn rejects_invalid_plot_config() {
+        let errors = parse(
+            r#"
+            [[plots]]
+            id = "trace"
+            source = "made_up"
+            scale = 0
+            multiply = nan
+            offset = inf
+            history = 2
+            range = { min = 10, max = 10 }
+            threshold = { low = 80, high = 10 }
+
+            [[monitors]]
+            id = "trace"
+            source = "temp"
+            "#,
+        )
+        .unwrap_err();
+
+        for expected in [
+            "unknown plot source",
+            "scale",
+            "multiply",
+            "offset",
+            "history",
+            "plot range",
+            "threshold",
+            "duplicate widget id",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected an error containing `{expected}`: {errors:?}"
+            );
+        }
     }
 
     fn documentation_toml_blocks(document: &str) -> Vec<(usize, String)> {

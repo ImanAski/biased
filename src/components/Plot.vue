@@ -1,33 +1,37 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { telemetry } from "../lib/device";
+import { plotValue, type PlotWidget } from "../lib/widgets";
 
-const props = withDefaults(
-  defineProps<{
-    title?: string;
-    unit?: string;
-    digits?: number;
-    points?: number;
-  }>(),
-  {
-    title: "Bias Voltage",
-    unit: "V",
-    digits: 2,
-    points: 90,
-  },
-);
+const props = defineProps<{ plot: PlotWidget }>();
 
 const samples = ref<number[]>([]);
 
+// Changing the source or its transform makes existing samples incomparable, so
+// start a fresh trace. `telemetry.updatedAt` changes on every sample even when
+// the value is unchanged, keeping flat traces moving.
+const transformKey = computed(() =>
+  [
+    props.plot.source,
+    props.plot.scale,
+    props.plot.multiply,
+    props.plot.offset,
+    props.plot.offsetFirst,
+  ].join("|"),
+);
+let lastTransform = transformKey.value;
+
 watch(
-  // `updatedAt` changes on every telemetry sample, even when the value is the
-  // same, so a flat trace still advances instead of freezing on one point.
-  () => telemetry.updatedAt,
-  () => {
-    const value = telemetry.biasVoltage;
-    if (value === null || !Number.isFinite(value)) return;
+  () => [telemetry.updatedAt, transformKey.value] as const,
+  ([, key]) => {
+    if (key !== lastTransform) {
+      samples.value = [];
+      lastTransform = key;
+    }
+    const value = plotValue(props.plot);
+    if (value === null) return;
     samples.value.push(value);
-    const limit = Math.max(2, props.points);
+    const limit = Math.max(2, props.plot.history);
     if (samples.value.length > limit) {
       samples.value.splice(0, samples.value.length - limit);
     }
@@ -35,12 +39,21 @@ watch(
   { immediate: true },
 );
 
-const current = computed(() => telemetry.biasVoltage);
+const current = computed(() => plotValue(props.plot));
 const display = computed(() =>
-  current.value === null ? "—" : current.value.toFixed(props.digits),
+  current.value === null ? "—" : current.value.toFixed(props.plot.digits),
 );
 
 const bounds = computed(() => {
+  const range = props.plot.range;
+  if (
+    range &&
+    Number.isFinite(range.min) &&
+    Number.isFinite(range.max) &&
+    range.min < range.max
+  ) {
+    return { min: range.min, max: range.max };
+  }
   if (samples.value.length === 0) return { min: 0, max: 1 };
   let min = Math.min(...samples.value);
   let max = Math.max(...samples.value);
@@ -71,13 +84,41 @@ const line = computed(() =>
 );
 
 const area = computed(() =>
-  samples.value.length === 0 ? "" : `0,40 ${line.value} 100,40`,
+  props.plot.fill !== false && samples.value.length > 0
+    ? `0,40 ${line.value} 100,40`
+    : "",
 );
 
 const lastPoint = computed(() => {
-  if (samples.value.length === 0) return null;
+  if (props.plot.marker === false || samples.value.length === 0) return null;
   const index = samples.value.length - 1;
   return { x: x(index), y: y(samples.value[index]) };
+});
+
+const gridLines = computed(() => (props.plot.grid === false ? [] : [4, 21, 38]));
+
+const referenceLines = computed(() => {
+  const threshold = props.plot.threshold;
+  if (!threshold) return [];
+  const { min, max } = bounds.value;
+  const lines: { y: number; key: string }[] = [];
+  if (
+    threshold.low !== null &&
+    Number.isFinite(threshold.low) &&
+    threshold.low >= min &&
+    threshold.low <= max
+  ) {
+    lines.push({ key: "low", y: y(threshold.low) });
+  }
+  if (
+    threshold.high !== null &&
+    Number.isFinite(threshold.high) &&
+    threshold.high >= min &&
+    threshold.high <= max
+  ) {
+    lines.push({ key: "high", y: y(threshold.high) });
+  }
+  return lines;
 });
 </script>
 
@@ -85,11 +126,13 @@ const lastPoint = computed(() => {
   <div class="w-full space-y-3 rounded-2xl border border-line bg-panel p-5">
     <div class="flex items-start justify-between gap-3">
       <div class="flex flex-col">
-        <span class="font-bold uppercase text-muted">{{ title }}</span>
-        <span class="text-xs text-faint">Rolling telemetry history</span>
+        <span class="font-bold uppercase text-muted">{{ plot.label }}</span>
+        <span class="text-xs text-faint">
+          {{ plot.description || "Rolling telemetry history" }}
+        </span>
       </div>
       <span class="font-mono text-2xl tabular-nums text-ink">
-        {{ display }} {{ unit }}
+        {{ display }} {{ plot.unit }}
       </span>
     </div>
 
@@ -99,10 +142,10 @@ const lastPoint = computed(() => {
         class="h-full w-full"
         preserveAspectRatio="none"
         role="img"
-        :aria-label="`${title} trend`"
+        :aria-label="`${plot.label} trend`"
       >
         <line
-          v-for="mark in [4, 21, 38]"
+          v-for="mark in gridLines"
           :key="mark"
           x1="0"
           :y1="mark"
@@ -111,6 +154,19 @@ const lastPoint = computed(() => {
           stroke="currentColor"
           class="text-line/60"
           stroke-width="0.4"
+          vector-effect="non-scaling-stroke"
+        />
+        <line
+          v-for="reference in referenceLines"
+          :key="reference.key"
+          x1="0"
+          :y1="reference.y"
+          x2="100"
+          :y2="reference.y"
+          stroke="currentColor"
+          class="text-warning/60"
+          stroke-width="0.5"
+          stroke-dasharray="2 2"
           vector-effect="non-scaling-stroke"
         />
         <polygon v-if="area" :points="area" class="fill-accent/10" />
@@ -138,16 +194,16 @@ const lastPoint = computed(() => {
         v-if="samples.length === 0"
         class="absolute inset-0 flex items-center justify-center rounded-xl border border-dashed border-line text-sm text-faint"
       >
-        waiting for bias voltage samples…
+        waiting for {{ plot.source }} samples…
       </div>
     </div>
 
     <div class="flex justify-between gap-2 text-xs">
       <span class="text-faint">
-        {{ bounds.min.toFixed(digits) }} – {{ bounds.max.toFixed(digits) }} {{ unit }}
+        {{ bounds.min.toFixed(plot.digits) }} – {{ bounds.max.toFixed(plot.digits) }} {{ plot.unit }}
       </span>
       <span class="shrink-0 text-dim">
-        {{ samples.length }} / {{ points }} samples
+        {{ samples.length }} / {{ plot.history }} samples
       </span>
     </div>
   </div>

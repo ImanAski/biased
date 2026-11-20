@@ -34,6 +34,24 @@
 #                    (default: theta0=rsv0, biasCurrent=rsv1, supplyVoltage=rsv2,
 #                    phaseError=rsv3)
 #
+#  Plots (rolling trend charts rendered above the monitor cards):
+#    id/label/source/unit/digits/description  as for monitors below
+#    scale       first display multiplier (default 1.0; finite and non-zero)
+#    multiply    second display multiplier (default 1.0; finite and non-zero)
+#    offset      value added to the telemetry (default 0.0; finite)
+#    offsetFirst true to add offset before scaling (default false)
+#                Display value = raw * scale * multiply + offset, or
+#                (raw + offset) * scale * multiply when offsetFirst = true.
+#                The transform is applied to every plotted sample, so range and
+#                threshold are interpreted in display units.
+#    history     samples kept in the trace (8..600, default 90)
+#    range       optional fixed Y axis: { min = 0, max = 10 }
+#                (when omitted the chart auto-scales to the visible samples)
+#    threshold   optional horizontal reference lines: { low = 1, high = 9 }
+#    fill        draw the area under the trace (default true)
+#    grid        draw horizontal grid lines (default true)
+#    marker      highlight the latest sample with a dot (default true)
+#
 #  Monitors (read-only, fed by inbound telemetry):
 #    id          unique name for this widget
 #    label       card title (defaults to id)
@@ -87,6 +105,24 @@ theta0 = "rsv0"
 biasCurrent = "rsv1"
 supplyVoltage = "rsv2"
 phaseError = "rsv3"
+
+# ---------------------------------- Plots ------------------------------------
+
+[[plots]]
+id = "bias_voltage"
+label = "Bias Voltage"
+source = "biasVoltage"
+unit = "V"
+digits = 2
+description = "Rolling telemetry history"
+scale = 1.0
+multiply = 1.0
+offset = 0.0
+offsetFirst = false
+history = 90
+fill = true
+grid = true
+marker = true
 
 # --------------------------------- Monitors ----------------------------------
 

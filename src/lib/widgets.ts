@@ -49,6 +49,35 @@ export interface NumberRange {
   step: number | null;
 }
 
+export interface PlotWidget {
+  id: string;
+  label: string;
+  source: MonitorSource;
+  unit: string;
+  digits: number;
+  description: string;
+  /** First multiplier applied to inbound telemetry for display. */
+  scale: number;
+  /** Second multiplier, useful for combining wire and display units. */
+  multiply: number;
+  /** Value added to the telemetry (before or after scaling, see `offsetFirst`). */
+  offset: number;
+  /** When true, add `offset` before applying `scale` and `multiply`. */
+  offsetFirst: boolean;
+  /** Samples retained in the trace. */
+  history: number;
+  /** Optional fixed Y axis; the chart auto-scales when null. */
+  range: NumberRange | null;
+  /** Optional horizontal reference lines. */
+  threshold: Threshold | null;
+  /** Draw the filled area under the trace. */
+  fill: boolean;
+  /** Draw horizontal grid lines. */
+  grid: boolean;
+  /** Highlight the most recent sample with a dot. */
+  marker: boolean;
+}
+
 export interface Threshold {
   low: number | null;
   high: number | null;
@@ -125,6 +154,7 @@ export interface ProtocolConfig {
 
 export interface WidgetConfig {
   title: string;
+  plots: PlotWidget[];
   monitors: MonitorWidget[];
   controls: ControlWidget[];
   protocol: ProtocolConfig;
@@ -177,6 +207,26 @@ function fallbackConfig(): WidgetConfig {
         phaseError: "rsv3",
       },
     },
+    plots: [
+      {
+        id: "bias_voltage",
+        label: "Bias Voltage",
+        source: "biasVoltage",
+        unit: "V",
+        digits: 2,
+        description: "Rolling telemetry history",
+        scale: 1,
+        multiply: 1,
+        offset: 0,
+        offsetFirst: false,
+        history: 90,
+        range: null,
+        threshold: null,
+        fill: true,
+        grid: true,
+        marker: true,
+      },
+    ],
     monitors: [
       {
         id: "theta0",
@@ -479,6 +529,7 @@ export async function loadWidgetConfig(
     }
 
     widgetConfig.title = envelope.config.title;
+    widgetConfig.plots = envelope.config.plots;
     widgetConfig.monitors = envelope.config.monitors;
     widgetConfig.controls = envelope.config.controls;
 
@@ -487,7 +538,7 @@ export async function loadWidgetConfig(
     if (!options.quiet) {
       addLog(
         "info",
-        `Widget layout loaded: ${envelope.config.monitors.length} monitors, ${envelope.config.controls.length} controls`,
+        `Widget layout loaded: ${envelope.config.plots.length} plots, ${envelope.config.monitors.length} monitors, ${envelope.config.controls.length} controls`,
       );
     }
     return true;
@@ -569,25 +620,50 @@ export function exportLockedBuild(target: string): Promise<LockedExport> {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Monitor helpers                                                           */
+/* Monitor & plot helpers                                                    */
 /* -------------------------------------------------------------------------- */
 
-export function monitorValue(monitor: MonitorWidget): number | null {
-  const value = telemetry[monitor.source];
+/** Apply the shared linear display transform to a telemetry source. */
+function scaledTelemetryValue(
+  source: MonitorSource,
+  scale: number,
+  multiply: number,
+  offset: number,
+  offsetFirst: boolean,
+): number | null {
+  const value = telemetry[source];
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
 
   // The backend validates these; stay safe with hand-written preview data.
-  const scale =
-    Number.isFinite(monitor.scale) && monitor.scale !== 0 ? monitor.scale : 1;
-  const multiply =
-    Number.isFinite(monitor.multiply) && monitor.multiply !== 0
-      ? monitor.multiply
-      : 1;
-  const offset = Number.isFinite(monitor.offset) ? monitor.offset : 0;
+  const safeScale = Number.isFinite(scale) && scale !== 0 ? scale : 1;
+  const safeMultiply =
+    Number.isFinite(multiply) && multiply !== 0 ? multiply : 1;
+  const safeOffset = Number.isFinite(offset) ? offset : 0;
 
-  return monitor.offsetFirst
-    ? (value + offset) * scale * multiply
-    : value * scale * multiply + offset;
+  return offsetFirst
+    ? (value + safeOffset) * safeScale * safeMultiply
+    : value * safeScale * safeMultiply + safeOffset;
+}
+
+export function monitorValue(monitor: MonitorWidget): number | null {
+  return scaledTelemetryValue(
+    monitor.source,
+    monitor.scale,
+    monitor.multiply,
+    monitor.offset,
+    monitor.offsetFirst,
+  );
+}
+
+/** Transform a raw telemetry sample for display in a plot trace. */
+export function plotValue(plot: PlotWidget): number | null {
+  return scaledTelemetryValue(
+    plot.source,
+    plot.scale,
+    plot.multiply,
+    plot.offset,
+    plot.offsetFirst,
+  );
 }
 
 /* -------------------------------------------------------------------------- */
