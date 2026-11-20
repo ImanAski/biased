@@ -48,6 +48,18 @@ export interface TxEvent {
   txs: number;
 }
 
+/** Payload for the `serial://calibration` event emitted by the Rust reader. */
+export interface CalibrationEvent {
+  /** Backend request id, useful for debugging out-of-order replies. */
+  id: number;
+  /** Sequence number of the calibration write. */
+  seq: number;
+  /** True when the MCU acknowledged or reported calibration complete. */
+  ok: boolean;
+  /** What ended the loading state. */
+  source: "ack" | "calibrationDone" | "timeout" | "disconnected";
+}
+
 /**
  * Values reported *by* the MCU. These are monitored only; the app never writes
  * them. `null` means "no sample yet".
@@ -148,6 +160,8 @@ export const status = reactive<SerialStatus>({
 
 export const ports = ref<PortInfo[]>([]);
 export const uiError = ref<string | null>(null);
+/** True while the Calibrate button waits for the MCU acknowledgement. */
+export const calibrationPending = ref(false);
 /** Sequence number of the most recent frame the MCU received. */
 export const lastSeq = ref(0);
 
@@ -239,6 +253,26 @@ export async function initDevice() {
     applyTelemetry(event.payload);
   });
 
+  // The backend emits this when the calibration ACK (or calibrationDone flag)
+  // arrives, or when the wait times out / the link closes.
+  await listen<CalibrationEvent>("serial://calibration", (event) => {
+    calibrationPending.value = false;
+    switch (event.payload.source) {
+      case "ack":
+        addLog("info", "Calibration acknowledged by MCU");
+        break;
+      case "calibrationDone":
+        addLog("info", "Calibration complete");
+        break;
+      case "timeout":
+        addLog("warn", "Calibration ACK timed out");
+        break;
+      case "disconnected":
+        addLog("warn", "Calibration cancelled: serial link closed");
+        break;
+    }
+  });
+
   await Promise.all([refreshStatus(), refreshPorts(), syncWireFormat()]);
 }
 
@@ -315,10 +349,18 @@ export async function sendStateNow() {
 /** Trigger the MCU calibration routine (one-shot command frame). */
 export async function calibrate() {
   if (!inTauri) return;
+  uiError.value = null;
+  const waitForAck = settings.waitForCalibrationAck;
+  if (waitForAck) calibrationPending.value = true;
+
   try {
     Object.assign(status, await invoke<SerialStatus>("calibrate"));
     addLog("info", "Calibration requested");
+    // With the toggle off, the button behaves like the old fire-and-forget
+    // action: loading lasts only as long as the command call itself.
+    if (!waitForAck) calibrationPending.value = false;
   } catch (err) {
+    calibrationPending.value = false;
     uiError.value = String(err);
     addLog("error", `Calibration failed: ${uiError.value}`);
   }

@@ -13,6 +13,8 @@ export interface AppSettings {
   defaultBaud: number;
   /** Outbound wire format for master-generated query/command frames (editor builds). */
   wireFormat: WireFormat;
+  /** Keep the Calibrate button loading until the MCU acknowledges the request. */
+  waitForCalibrationAck: boolean;
 }
 
 const STORAGE_KEY = "bias-controller.settings";
@@ -20,6 +22,7 @@ const STORAGE_KEY = "bias-controller.settings";
 const DEFAULTS: AppSettings = {
   defaultBaud: 115200,
   wireFormat: "text",
+  waitForCalibrationAck: true,
 };
 
 function defaults(): AppSettings {
@@ -41,12 +44,16 @@ function load(): AppSettings {
     const parsed = JSON.parse(raw) as {
       defaultBaud?: unknown;
       wireFormat?: unknown;
+      waitForCalibrationAck?: unknown;
     };
     if (typeof parsed.defaultBaud === "number") {
       base.defaultBaud = parsed.defaultBaud;
     }
     if (isWireFormat(parsed.wireFormat)) {
       base.wireFormat = parsed.wireFormat;
+    }
+    if (typeof parsed.waitForCalibrationAck === "boolean") {
+      base.waitForCalibrationAck = parsed.waitForCalibrationAck;
     }
 
     return base;

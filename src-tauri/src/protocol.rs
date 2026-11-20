@@ -351,10 +351,15 @@ pub fn decode_rs_master(buf: &[u8], cfg: &ProtocolConfig) -> Option<(usize, Tele
             }
         }
     } else {
-        // Write acknowledge: [tx_header][rx_footer]. Consume it silently; an
-        // unexpected first byte is dropped one at a time to resynchronize.
-        let consumed = if buf[0] == cfg.tx_header && buf.get(1) == Some(&cfg.rx_footer) {
-            2
+        // Write acknowledge: [tx_header][rx_footer]. Wait for the footer when
+        // the two bytes arrive in separate reads; otherwise consume the ACK
+        // silently and drop unexpected bytes one at a time to resynchronize.
+        let consumed = if buf[0] == cfg.tx_header {
+            match buf.get(1) {
+                Some(byte) if *byte == cfg.rx_footer => 2,
+                Some(_) => 1,
+                None => return None,
+            }
         } else {
             1
         };
@@ -774,6 +779,17 @@ mod tests {
         let cfg = ProtocolConfig::default();
         let (consumed, patch) = decode_rs_master(&[0x71, 0x23, 0x77], &cfg).unwrap();
 
+        assert_eq!(consumed, 2);
+        assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn waits_for_split_write_ack() {
+        let cfg = ProtocolConfig::default();
+
+        assert!(decode_rs_master(&[0x71], &cfg).is_none());
+
+        let (consumed, patch) = decode_rs_master(&[0x71, 0x23], &cfg).unwrap();
         assert_eq!(consumed, 2);
         assert!(patch.is_empty());
     }

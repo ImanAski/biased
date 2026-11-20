@@ -35,6 +35,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// thread notices a disconnect quickly, long enough for ordinary writes.
 const IO_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// How long the UI keeps the Calibrate button loading when no MCU reply arrives.
+const CALIBRATION_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Longest inbound buffer/line we keep before dropping data to resync.
 const MAX_RX_BUFFER: usize = 8192;
 
@@ -61,6 +64,10 @@ struct Inner {
     reader_handle: Option<JoinHandle<()>>,
     sender_stop: Option<Arc<AtomicBool>>,
     sender: SenderState,
+    /// Calibration request waiting for an MCU acknowledgement.
+    calibration_wait: Option<CalibrationWait>,
+    /// Monotonic request id, used to ignore stale ACKs.
+    calibration_id: u64,
 }
 
 impl Inner {
@@ -83,6 +90,8 @@ impl Inner {
             reader_handle: None,
             sender_stop: None,
             sender: SenderState::stopped(),
+            calibration_wait: None,
+            calibration_id: 0,
         }
     }
 
@@ -97,6 +106,25 @@ impl Inner {
             last_error: self.last_error.clone(),
             tick_ms: self.protocol_cfg.tick_ms,
         }
+    }
+
+    /// Complete the pending calibration request, ignoring stale id matches.
+    fn finish_calibration(
+        &mut self,
+        id: Option<u64>,
+        outcome: CalibrationOutcome,
+    ) -> Option<CalibrationEvent> {
+        let wait = self.calibration_wait.as_ref()?;
+        if id.is_some_and(|id| id != wait.id) {
+            return None;
+        }
+        let wait = self.calibration_wait.take()?;
+        Some(CalibrationEvent {
+            id: wait.id,
+            seq: wait.seq,
+            ok: outcome.acknowledged(),
+            source: outcome,
+        })
     }
 
     /// Stop the reader thread; the caller joins the handle outside the lock.
@@ -165,6 +193,11 @@ impl SerialManager {
         self.shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Shared handle for background threads (calibration timeout, reader).
+    fn shared(&self) -> Arc<Mutex<Inner>> {
+        Arc::clone(&self.shared)
     }
 
     /// Spawn the master clock loop. It runs for the lifetime of the process.
@@ -279,6 +312,44 @@ struct RxEvent {
     /// Bytes received since the last connect.
     total_bytes: u64,
     synthetic: bool,
+}
+
+/// One outstanding calibration request, matched by `id` so a late ACK cannot
+/// complete a newer request.
+#[derive(Clone, Debug)]
+struct CalibrationWait {
+    id: u64,
+    seq: u32,
+}
+
+/// What ended the calibration loading state.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum CalibrationOutcome {
+    /// RS write acknowledge (`[tx_header][rx_footer]`) received.
+    Ack,
+    /// Telemetry reported `calibrationDone = 1`.
+    CalibrationDone,
+    /// No reply within `CALIBRATION_TIMEOUT`.
+    Timeout,
+    /// Serial link closed before a reply arrived.
+    Disconnected,
+}
+
+impl CalibrationOutcome {
+    fn acknowledged(self) -> bool {
+        matches!(self, Self::Ack | Self::CalibrationDone)
+    }
+}
+
+/// Emitted on `serial://calibration` so the frontend can clear its button state.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationEvent {
+    id: u64,
+    seq: u32,
+    ok: bool,
+    source: CalibrationOutcome,
 }
 
 /// Public scheduler snapshot for the UI.
@@ -618,6 +689,38 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// RS write acknowledge: `[tx_header][rx_footer]`.
+fn is_rs_write_ack(buf: &[u8], cfg: &config::ProtocolConfig) -> bool {
+    buf.first() == Some(&cfg.tx_header) && buf.get(1) == Some(&cfg.rx_footer)
+}
+
+/// Finish the outstanding calibration wait and notify the UI.
+fn emit_calibration(app: &AppHandle, shared: &Arc<Mutex<Inner>>, outcome: CalibrationOutcome) {
+    let event = {
+        let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+        inner.finish_calibration(None, outcome)
+    };
+    if let Some(event) = event {
+        let _ = app.emit("serial://calibration", event);
+    }
+}
+
+/// Merge a decoded telemetry patch into the snapshot and publish it.
+fn publish_telemetry_patch(
+    app: &AppHandle,
+    shared: &Arc<Mutex<Inner>>,
+    patch: &protocol::TelemetryPatch,
+) {
+    if patch.is_empty() {
+        return;
+    }
+    {
+        let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
+        inner.telemetry.merge(patch);
+    }
+    let _ = app.emit("telemetry://state", patch.clone());
+}
+
 fn spawn_reader(
     app: AppHandle,
     shared: Arc<Mutex<Inner>>,
@@ -657,9 +760,12 @@ fn spawn_reader(
                         }
                         config::ProtocolDriver::Rs => {
                             loop {
-                                let cfg = {
+                                let (cfg, ack) = {
                                     let inner = shared.lock().unwrap_or_else(|p| p.into_inner());
-                                    inner.protocol_cfg.clone()
+                                    (
+                                        inner.protocol_cfg.clone(),
+                                        is_rs_write_ack(&rxbuf, &inner.protocol_cfg),
+                                    )
                                 };
                                 match protocol::decode_rs_master(&rxbuf, &cfg) {
                                     None => break,
@@ -668,13 +774,20 @@ fn spawn_reader(
                                             break;
                                         }
                                         rxbuf.drain(..consumed.min(rxbuf.len()));
-                                        if !patch.is_empty() {
-                                            {
-                                                let mut inner =
-                                                    shared.lock().unwrap_or_else(|p| p.into_inner());
-                                                inner.telemetry.merge(&patch);
-                                            }
-                                            let _ = app.emit("telemetry://state", patch);
+                                        if ack {
+                                            emit_calibration(
+                                                &app,
+                                                &shared,
+                                                CalibrationOutcome::Ack,
+                                            );
+                                        }
+                                        publish_telemetry_patch(&app, &shared, &patch);
+                                        if patch.lock_status == Some(1.0) {
+                                            emit_calibration(
+                                                &app,
+                                                &shared,
+                                                CalibrationOutcome::CalibrationDone,
+                                            );
                                         }
                                     }
                                 }
@@ -691,13 +804,18 @@ fn spawn_reader(
                 Err(err) => match err.kind() {
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => continue,
                     _ => {
-                        let status = {
+                        let (status, calibration) = {
                             let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
                             inner.port = None;
                             inner.last_error = Some(format!("read failed: {err}"));
-                            inner.status()
+                            let calibration =
+                                inner.finish_calibration(None, CalibrationOutcome::Disconnected);
+                            (inner.status(), calibration)
                         };
                         let _ = app.emit("serial://status", status);
+                        if let Some(calibration) = calibration {
+                            let _ = app.emit("serial://calibration", calibration);
+                        }
                         stop.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -729,12 +847,14 @@ fn emit_rx(app: &AppHandle, shared: &Arc<Mutex<Inner>>, bytes: &[u8], synthetic:
 
 fn parse_and_emit_telemetry(app: &AppHandle, shared: &Arc<Mutex<Inner>>, raw: &[u8]) {
     let text = String::from_utf8_lossy(raw);
+    // Legacy text devices answer the CAL command with an echo/OK line rather
+    // than the RS two-byte ACK.
+    let upper = text.to_ascii_uppercase();
+    if upper.contains("CAL") || upper.contains("OK") {
+        emit_calibration(app, shared, CalibrationOutcome::Ack);
+    }
     if let Some(patch) = protocol::parse_telemetry_line(&text) {
-        {
-            let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
-            inner.telemetry.merge(&patch);
-        }
-        let _ = app.emit("telemetry://state", patch);
+        publish_telemetry_patch(app, shared, &patch);
     }
 }
 
@@ -759,9 +879,12 @@ fn ingest_bytes(app: &AppHandle, shared: &Arc<Mutex<Inner>>, bytes: &[u8], synth
         config::ProtocolDriver::Rs => {
             let mut buf = bytes.to_vec();
             loop {
-                let cfg = {
+                let (cfg, ack) = {
                     let inner = shared.lock().unwrap_or_else(|p| p.into_inner());
-                    inner.protocol_cfg.clone()
+                    (
+                        inner.protocol_cfg.clone(),
+                        is_rs_write_ack(&buf, &inner.protocol_cfg),
+                    )
                 };
                 match protocol::decode_rs_master(&buf, &cfg) {
                     None => break,
@@ -770,12 +893,12 @@ fn ingest_bytes(app: &AppHandle, shared: &Arc<Mutex<Inner>>, bytes: &[u8], synth
                             break;
                         }
                         buf.drain(..consumed.min(buf.len()));
-                        if !patch.is_empty() {
-                            {
-                                let mut inner = shared.lock().unwrap_or_else(|p| p.into_inner());
-                                inner.telemetry.merge(&patch);
-                            }
-                            let _ = app.emit("telemetry://state", patch);
+                        if ack {
+                            emit_calibration(app, shared, CalibrationOutcome::Ack);
+                        }
+                        publish_telemetry_patch(app, shared, &patch);
+                        if patch.lock_status == Some(1.0) {
+                            emit_calibration(app, shared, CalibrationOutcome::CalibrationDone);
                         }
                     }
                 }
@@ -960,13 +1083,17 @@ fn connect(
 ) -> Result<Status, String> {
     // Stop the old reader before opening the new handle. On Windows a cloned
     // handle keeps the COM port busy until its thread exits.
-    let old_reader = {
+    let (old_reader, calibration) = {
         let mut inner = manager.lock();
         let handle = inner.stop_reader();
         inner.stop_sender();
         inner.port = None;
-        handle
+        let calibration = inner.finish_calibration(None, CalibrationOutcome::Disconnected);
+        (handle, calibration)
     };
+    if let Some(calibration) = calibration {
+        let _ = app.emit("serial://calibration", calibration);
+    }
     if let Some(handle) = old_reader {
         let _ = handle.join();
     }
@@ -1023,7 +1150,7 @@ fn connect(
 
 #[tauri::command]
 fn disconnect(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status, String> {
-    let (status, sender_state, reader) = {
+    let (status, sender_state, reader, calibration) = {
         let mut inner = manager.lock();
         let reader = inner.stop_reader();
         inner.stop_sender();
@@ -1033,14 +1160,18 @@ fn disconnect(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Statu
             let _ = port.flush();
             inner.port_name = None;
         }
+        let calibration = inner.finish_calibration(None, CalibrationOutcome::Disconnected);
 
-        (inner.status(), inner.sender.clone(), reader)
+        (inner.status(), inner.sender.clone(), reader, calibration)
     };
 
     if let Some(handle) = reader {
         let _ = handle.join();
     }
 
+    if let Some(calibration) = calibration {
+        let _ = app.emit("serial://calibration", calibration);
+    }
     let _ = app.emit("serial://status", status.clone());
     let _ = app.emit("serial://sender", sender_state);
     Ok(status)
@@ -1127,11 +1258,31 @@ fn calibrate(app: AppHandle, manager: State<'_, SerialManager>) -> Result<Status
 
     let seq = inner.seq;
     let txs = inner.txs;
+    // Track this request so the reader can emit a completion event when the
+    // MCU acknowledges it. A new request supersedes any older pending one.
+    let id = inner.calibration_id.wrapping_add(1);
+    inner.calibration_id = id;
+    inner.calibration_wait = Some(CalibrationWait { id, seq });
     let status = inner.status();
     drop(inner);
 
     let _ = app.emit("serial://tx", TxEvent { seq, txs });
     let _ = app.emit("serial://status", status.clone());
+
+    // Safety net: if no ACK/telemetry arrives, clear the UI loading state.
+    let timeout_app = app.clone();
+    let timeout_shared = manager.shared();
+    thread::spawn(move || {
+        thread::sleep(CALIBRATION_TIMEOUT);
+        let event = {
+            let mut inner = timeout_shared.lock().unwrap_or_else(|p| p.into_inner());
+            inner.finish_calibration(Some(id), CalibrationOutcome::Timeout)
+        };
+        if let Some(event) = event {
+            let _ = timeout_app.emit("serial://calibration", event);
+        }
+    });
+
     Ok(status)
 }
 
@@ -1547,6 +1698,43 @@ mod tests {
 
         let unknown = render_packet(&spec(PacketEncoding::Text, "{nope}"), &inner, 1, 0, 0);
         assert!(unknown.unwrap_err().contains("unknown template variable"));
+    }
+
+    #[test]
+    fn calibration_wait_completes_once_and_ignores_stale_ids() {
+        let mut inner = Inner::new();
+        inner.calibration_id = 7;
+        inner.calibration_wait = Some(CalibrationWait { id: 7, seq: 42 });
+
+        // A stale timeout from request 6 must not clear request 7.
+        let stale = inner.finish_calibration(Some(6), CalibrationOutcome::Timeout);
+        assert!(stale.is_none());
+        assert!(inner.calibration_wait.is_some());
+
+        let event = inner
+            .finish_calibration(Some(7), CalibrationOutcome::Ack)
+            .expect("current request should complete");
+        assert_eq!(event.id, 7);
+        assert_eq!(event.seq, 42);
+        assert!(event.ok);
+        assert!(matches!(event.source, CalibrationOutcome::Ack));
+
+        // A second reply (e.g. calibrationDone after the ACK) is ignored.
+        assert!(inner
+            .finish_calibration(None, CalibrationOutcome::CalibrationDone)
+            .is_none());
+    }
+
+    #[test]
+    fn calibration_timeout_is_not_an_ack() {
+        let mut inner = Inner::new();
+        inner.calibration_wait = Some(CalibrationWait { id: 1, seq: 9 });
+
+        let event = inner
+            .finish_calibration(Some(1), CalibrationOutcome::Timeout)
+            .expect("pending request should finish");
+        assert!(!event.ok);
+        assert!(matches!(event.source, CalibrationOutcome::Timeout));
     }
 }
 

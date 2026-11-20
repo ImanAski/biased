@@ -366,6 +366,26 @@ function resetDefaults() {
       </label>
     </section>
 
+    <section class="space-y-3 rounded-2xl border border-line bg-panel p-5">
+      <span class="text-xs font-bold uppercase text-muted">Calibration</span>
+
+      <label class="flex max-w-xl cursor-pointer items-start gap-3">
+        <input
+          v-model="settings.waitForCalibrationAck"
+          type="checkbox"
+          class="mt-0.5 h-4 w-4 shrink-0 rounded border-line-strong bg-field accent-accent"
+        />
+        <span class="space-y-1">
+          <span class="block text-sm text-muted">Wait for MCU acknowledgement</span>
+          <span class="block text-xs text-faint">
+            Keeps the Calibrate button in a loading state until the MCU replies
+            (or 10 s elapses). When off, the button resets as soon as the command
+            is sent.
+          </span>
+        </span>
+      </label>
+    </section>
+
     <section class="space-y-2 rounded-2xl border border-line bg-panel p-5">
       <span class="text-xs font-bold uppercase text-muted">Master clock</span>
       <div class="flex justify-between text-sm">
@@ -386,7 +406,7 @@ function resetDefaults() {
       </div>
       <div class="flex justify-between text-sm">
         <span class="text-muted">Application</span>
-        <span class="text-ink">v0.6.2</span>
+        <span class="text-ink">v0.6.4</span>
       </div>
     </section>
 

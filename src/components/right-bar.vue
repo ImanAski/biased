@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import ControlWidget from "./control-widget.vue";
 import {
   calibrate,
+  calibrationPending,
   connect,
   disconnect,
   ports,
@@ -148,10 +149,16 @@ const fieldClass =
 
       <button
         class="w-full rounded-lg border border-accent/40 bg-accent/15 py-2 text-sm font-semibold text-accent transition hover:bg-accent/25 disabled:opacity-40"
-        :disabled="!status.connected"
+        :disabled="!status.connected || calibrationPending"
+        :aria-busy="calibrationPending"
         @click="calibrate"
       >
-        Calibrate
+        <span
+          v-if="calibrationPending"
+          class="mr-2 inline-block h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent"
+          aria-hidden="true"
+        ></span>
+        {{ calibrationPending ? "Calibrating…" : "Calibrate" }}
       </button>
     </div>
   </div>

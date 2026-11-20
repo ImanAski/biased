@@ -18,7 +18,13 @@ The app is the master: the Rust-owned clock starts a new transaction every tick
 by requesting status, and the MCU answers with the telemetry frame that feeds
 the monitor cards. Writes only happen when the user clicks **Send command** or
 **Calibrate**; the MCU replies with a two-byte acknowledge that is consumed
-without producing telemetry.
+without producing telemetry. For calibration, that acknowledge (or a telemetry
+frame with `calibrationDone = 1`) emits `serial://calibration` so the UI can keep
+the **Calibrate** button in a loading state until the device responds. The wait
+ends after 10 s if no reply arrives, or immediately if the serial link closes.
+The behaviour is controlled by **Settings → Calibration → Wait for MCU
+acknowledgement**; when disabled, the button resets as soon as the command is
+sent.
 
 ## Master frames
 
